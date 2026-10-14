@@ -9,7 +9,7 @@ class TransitApp extends StatelessWidget {
   ThemeData _theme(Brightness b) => ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1E6FD9), brightness: b),
-        cardTheme: CardTheme(
+        cardTheme: CardThemeData(
           elevation: 3,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         ),
