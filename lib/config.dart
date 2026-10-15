@@ -1,17 +1,30 @@
-/// Настройки приложения.
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Настройки приложения. Ключи можно ввести прямо в программе (значок шестерёнки).
 class Config {
-  /// Обязательно укажите свой идентификатор: публичные серверы OSM
-  /// блокируют запросы без нормального User-Agent.
-  static const userAgent = 'TransitMapApp/1.0 (contact: you@example.com)';
+  static const userAgent = 'TransitMapDesktop/1.1 (personal use)';
 
-  /// Бесплатный ключ: https://www.transit.land/ (раздел API).
-  /// Нужен для реальных расписаний (GTFS) в выбранной остановке.
-  static const transitlandKey = '';
+  /// Бесплатный ключ: https://www.transit.land/ — нужен для расписаний отправлений.
+  static String transitlandKey = '';
 
-  /// Адрес вашего OpenTripPlanner 1.x, например https://otp.example.com
-  /// Нужен для маршрутов на общественном транспорте с пересадками.
-  static const otpUrl = '';
+  /// Адрес вашего OpenTripPlanner 1.x — нужен для маршрутов на транспорте по расписанию.
+  static String otpUrl = '';
 
-  /// Остановки грузятся, только когда карта приближена не меньше этого зума.
   static const minStopsZoom = 14.0;
+
+  static Future<void> load() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      transitlandKey = p.getString('tl_key') ?? '';
+      otpUrl = p.getString('otp_url') ?? '';
+    } catch (_) {}
+  }
+
+  static Future<void> save() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString('tl_key', transitlandKey);
+      await p.setString('otp_url', otpUrl);
+    } catch (_) {}
+  }
 }

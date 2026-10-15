@@ -46,15 +46,67 @@ class Stop {
   }
 }
 
-class RouteInfo {
-  final String mode, ref, name, from, to, operator;
-  RouteInfo(this.mode, this.ref, this.name, this.from, this.to, this.operator);
+/// Город, посёлок, деревня или хутор на карте.
+class PlaceDot {
+  final String name;
+  final LatLng pos;
+  final String kind; // city, town, village, hamlet
+  final int? population;
+  PlaceDot(this.name, this.pos, this.kind, this.population);
 }
+
+class RouteInfo {
+  final int id;
+  final String mode, ref, name, from, to, operator, interval, hours;
+  RouteInfo(this.id, this.mode, this.ref, this.name, this.from, this.to, this.operator,
+      this.interval, this.hours);
+}
+
+String modeRu(String m) => switch (m) {
+      'bus' => 'Автобус',
+      'trolleybus' => 'Троллейбус',
+      'tram' => 'Трамвай',
+      'train' => 'Поезд',
+      'subway' => 'Метро',
+      'light_rail' => 'Легкорельсовый',
+      'ferry' => 'Паром',
+      'monorail' => 'Монорельс',
+      _ => m,
+    };
 
 class Place {
   final String name;
   final LatLng pos;
-  Place(this.name, this.pos);
+  final String subtitle;
+  Place(this.name, this.pos, [this.subtitle = '']);
+}
+
+/// Краткая сводка об объекте на карте.
+class ObjectInfo {
+  final String title, typeLabel, address;
+  final List<MapEntry<String, String>> facts;
+  final String? wikiText, wikiImage, wikiUrl;
+  ObjectInfo(this.title, this.typeLabel, this.address, this.facts,
+      {this.wikiText, this.wikiImage, this.wikiUrl});
+}
+
+enum MapBase { scheme, dark, osm, satellite, hybrid }
+
+extension MapBaseX on MapBase {
+  String get label => switch (this) {
+        MapBase.scheme => 'Схема',
+        MapBase.dark => 'Тёмная',
+        MapBase.osm => 'OSM',
+        MapBase.satellite => 'Спутник',
+        MapBase.hybrid => 'Гибрид',
+      };
+  IconData get icon => switch (this) {
+        MapBase.scheme => Icons.map_outlined,
+        MapBase.dark => Icons.dark_mode_outlined,
+        MapBase.osm => Icons.public,
+        MapBase.satellite => Icons.satellite_alt,
+        MapBase.hybrid => Icons.layers,
+      };
 }
 
 enum RouteMode { walk, car, bike, transit }

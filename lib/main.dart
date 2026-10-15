@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
+import 'config.dart';
 import 'map_screen.dart';
 
-void main() => runApp(const TransitApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Config.load();
+  runApp(const TransitApp());
+}
 
 class TransitApp extends StatelessWidget {
   const TransitApp({super.key});
@@ -10,7 +15,7 @@ class TransitApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1E6FD9), brightness: b),
         cardTheme: CardThemeData(
-          elevation: 3,
+          elevation: 4,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         ),
       );
