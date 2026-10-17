@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' show sqrt;
 import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
@@ -6,9 +7,10 @@ import 'config.dart';
 import 'models.dart';
 
 const _hdr = {'User-Agent': Config.userAgent, 'Accept-Language': 'ru'};
+final http.Client _client = http.Client();
 
 Future<dynamic> _getJson(Uri uri) async {
-  final r = await http.get(uri, headers: _hdr).timeout(const Duration(seconds: 25));
+  final r = await _client.get(uri, headers: _hdr).timeout(const Duration(seconds: 25));
   if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
   return jsonDecode(utf8.decode(r.bodyBytes));
 }
@@ -24,7 +26,7 @@ Future<dynamic> _overpass(String query) async {
   Object? last;
   for (final url in _mirrors) {
     try {
-      final r = await http
+      final r = await _client
           .post(Uri.parse(url), headers: _hdr, body: {'data': query})
           .timeout(const Duration(seconds: 30));
       if (r.statusCode == 200) return jsonDecode(utf8.decode(r.bodyBytes));
@@ -45,7 +47,7 @@ Future<List<Stop>> loadStops(LatLngBounds b) async {
       'nwr["highway"="bus_stop"]($bb);'
       'nwr["railway"~"^(station|halt|tram_stop)\$"]($bb);'
       'nwr["amenity"~"^(ferry_terminal|bus_station)\$"]($bb);'
-      ');out center 600;';
+      ');out center 400;';
   final data = await _overpass(q);
   final res = <Stop>[];
   for (final e in (data['elements'] as List)) {
@@ -93,15 +95,7 @@ Future<List<PlaceDot>> loadPlaceDots(LatLngBounds b, double zoom) async {
 }
 
 // ------------------------------------------------------ маршруты на остановке
-Future<List<RouteInfo>> loadRoutesAtStop(LatLng pos) async {
-  final a = '${pos.latitude},${pos.longitude}';
-  final q = '[out:json][timeout:25];('
-      'node(around:70,$a)["public_transport"];'
-      'node(around:70,$a)["highway"="bus_stop"];'
-      'node(around:70,$a)["railway"~"^(stop|tram_stop|station|halt)\$"];'
-      ');rel(bn)["route"~"^(bus|tram|trolleybus|train|subway|light_rail|ferry|monorail)\$"];'
-      'out tags;';
-  final data = await _overpass(q);
+List<RouteInfo> _parseRoutes(dynamic data) {
   final seen = <int>{};
   final list = <RouteInfo>[];
   for (final e in (data['elements'] as List)) {
@@ -124,6 +118,76 @@ Future<List<RouteInfo>> loadRoutesAtStop(LatLng pos) async {
   return list;
 }
 
+/// Маршруты (линии), проходящие через остановки в радиусе [radius] метров от точки.
+Future<List<RouteInfo>> loadCandidateRoutes(LatLng pos, int radius) async {
+  final a = '${pos.latitude},${pos.longitude}';
+  final q = '[out:json][timeout:30];('
+      'node(around:$radius,$a)["public_transport"];'
+      'node(around:$radius,$a)["highway"="bus_stop"];'
+      'node(around:$radius,$a)["railway"~"^(stop|tram_stop|station|halt)\$"];'
+      ');rel(bn)["route"~"^(bus|tram|trolleybus|train|subway|light_rail|ferry|monorail)\$"];'
+      'out tags;';
+  return _parseRoutes(await _overpass(q));
+}
+
+Future<List<RouteInfo>> loadRoutesAtStop(LatLng pos) => loadCandidateRoutes(pos, 70);
+
+/// Остановки вдоль маршрутов по порядку (нужны для подбора пересадок).
+Future<Map<int, List<StopPt>>> loadRelationStops(List<int> ids) async {
+  final sb = StringBuffer('[out:json][timeout:60];(');
+  for (final i in ids) {
+    sb.write('rel($i);');
+  }
+  sb.write(');out body;node(r);out body;');
+  final data = await _overpass(sb.toString());
+  final nodes = <int, StopPt>{};
+  final rels = <Map>[];
+  for (final e in (data['elements'] as List)) {
+    if (e['type'] == 'node') {
+      final t = Map<String, dynamic>.from(e['tags'] ?? {});
+      nodes[e['id'] as int] = StopPt(
+        e['id'] as int,
+        LatLng((e['lat'] as num).toDouble(), (e['lon'] as num).toDouble()),
+        '${t['name:ru'] ?? t['name'] ?? ''}',
+      );
+    } else if (e['type'] == 'relation') {
+      rels.add(e as Map);
+    }
+  }
+  final out = <int, List<StopPt>>{};
+  for (final r in rels) {
+    final members = (r['members'] as List).where((m) => m['type'] == 'node').toList();
+    var sel = members.where((m) => '${m['role']}'.startsWith('stop')).toList();
+    if (sel.isEmpty) sel = members.where((m) => '${m['role']}'.startsWith('platform')).toList();
+    if (sel.isEmpty) sel = members;
+    final named = [
+      for (final m in members)
+        if (nodes[m['ref']] != null && nodes[m['ref']]!.name.isNotEmpty) nodes[m['ref']]!
+    ];
+    final list = <StopPt>[];
+    for (final m in sel) {
+      final n = nodes[m['ref']];
+      if (n == null) continue;
+      var name = n.name;
+      if (name.isEmpty) {
+        double best = 90;
+        for (final c in named) {
+          final dy = (c.pos.latitude - n.pos.latitude) * 111320;
+          final dx = (c.pos.longitude - n.pos.longitude) * 111320 * 0.6;
+          final d = (dx * dx + dy * dy);
+          if (d < best * best) {
+            best = sqrt(d);
+            name = c.name;
+          }
+        }
+      }
+      list.add(StopPt(n.id, n.pos, name.isEmpty ? 'остановка' : name));
+    }
+    out[r['id'] as int] = list;
+  }
+  return out;
+}
+
 /// Линия маршрута (пути) для показа на карте.
 Future<List<List<LatLng>>> loadRouteGeometry(int relId) async {
   final data = await _overpass('[out:json][timeout:30];rel($relId);out geom;');
@@ -142,11 +206,16 @@ Future<List<List<LatLng>>> loadRouteGeometry(int relId) async {
 }
 
 // ------------------------------------------------------------------- поиск
+final Map<String, List<Place>> _searchCache = {};
+
 Future<List<Place>> searchPlaces(String query, LatLng bias) async {
+  final ck = query.trim().toLowerCase();
+  final cached = _searchCache[ck];
+  if (cached != null) return cached;
   try {
     final data = await _getJson(Uri.https('photon.komoot.io', '/api/', {
       'q': query,
-      'limit': '8',
+      'limit': '6',
       'lat': '${bias.latitude}',
       'lon': '${bias.longitude}',
     }));
@@ -161,7 +230,7 @@ Future<List<Place>> searchPlaces(String query, LatLng bias) async {
           .join(', ');
       out.add(Place(name, LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()), sub));
     }
-    if (out.isNotEmpty) return out;
+    if (out.isNotEmpty) return _searchCache[ck] = out;
   } catch (_) {}
   // запасной вариант — Nominatim
   final data = await _getJson(Uri.https('nominatim.openstreetmap.org', '/search',
@@ -277,12 +346,92 @@ Future<ObjectInfo> loadObjectInfo(LatLng p, double mapZoom) async {
 }
 
 // ------------------------------------------------------------------ радар
-Future<String> loadRadarTemplate() async {
+Future<RadarData> loadRadar() async {
   final d = await _getJson(Uri.parse('https://api.rainviewer.com/public/weather-maps.json'));
-  final host = d['host'];
-  final past = d['radar']['past'] as List;
-  final path = past.last['path'];
-  return '$host$path/256/{z}/{x}/{y}/2/1_1.png';
+  final past = (d['radar']['past'] as List?) ?? [];
+  final now = (d['radar']['nowcast'] as List?) ?? [];
+  final frames = <RadarFrame>[
+    for (final f in past) RadarFrame('${f['path']}', (f['time'] as num).toInt(), false),
+    for (final f in now) RadarFrame('${f['path']}', (f['time'] as num).toInt(), true),
+  ];
+  if (frames.isEmpty) throw Exception('Нет кадров радара');
+  return RadarData('${d['host']}', frames, past.isEmpty ? 0 : past.length - 1);
+}
+
+// ----------------------------------------------------------------- погода
+double _n(dynamic v) => v is num ? v.toDouble() : 0.0;
+
+Future<WeatherInfo> loadWeather(LatLng p) async {
+  final d = await _getJson(Uri.https('api.open-meteo.com', '/v1/forecast', {
+    'latitude': '${p.latitude}',
+    'longitude': '${p.longitude}',
+    'current': 'temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,'
+        'weather_code,cloud_cover,wind_speed_10m,pressure_msl',
+    'hourly': 'temperature_2m,precipitation_probability,precipitation,weather_code',
+    'daily': 'precipitation_sum,precipitation_probability_max,temperature_2m_max,temperature_2m_min',
+    'minutely_15': 'precipitation',
+    'forecast_days': '2',
+    'timezone': 'auto',
+    'wind_speed_unit': 'ms',
+  }));
+  final cur = Map<String, dynamic>.from(d['current'] ?? {});
+  final curTime = '${cur['time'] ?? ''}';
+  final h = Map<String, dynamic>.from(d['hourly'] ?? {});
+  final times = (h['time'] as List?) ?? [];
+  final hourPrefix = curTime.length >= 13 ? curTime.substring(0, 13) : '';
+  var start = times.indexWhere((t) => '$t'.compareTo(hourPrefix) >= 0);
+  if (start < 0) start = 0;
+  final hours = <WeatherHour>[];
+  for (var i = start; i < times.length && hours.length < 12; i++) {
+    hours.add(WeatherHour(
+      '${times[i]}'.substring(11, 13),
+      _n(h['temperature_2m']?[i]),
+      _n(h['precipitation_probability']?[i]),
+      _n(h['precipitation']?[i]),
+      _n(h['weather_code']?[i]).round(),
+    ));
+  }
+  final dd = Map<String, dynamic>.from(d['daily'] ?? {});
+
+  String? nowcast;
+  final m15 = d['minutely_15'];
+  if (m15 is Map) {
+    final mt = (m15['time'] as List?) ?? [];
+    final mp = (m15['precipitation'] as List?) ?? [];
+    final s = mt.indexWhere((t) => '$t'.compareTo(curTime) >= 0);
+    if (s >= 0) {
+      final next = <double>[for (var i = s; i < s + 4 && i < mp.length; i++) _n(mp[i])];
+      final sum = next.fold<double>(0, (a, b) => a + b);
+      if (next.isNotEmpty) {
+        if (sum <= 0.01) {
+          nowcast = 'В ближайший час осадков не ожидается';
+        } else if (next.first > 0.01) {
+          nowcast = 'Осадки идут сейчас, за ближайший час ≈ ${sum.toStringAsFixed(1)} мм';
+        } else {
+          final idx = next.indexWhere((x) => x > 0.01);
+          nowcast = 'Осадки начнутся примерно через ${idx * 15} мин '
+              '(≈ ${sum.toStringAsFixed(1)} мм за час)';
+        }
+      }
+    }
+  }
+
+  return WeatherInfo(
+    temp: _n(cur['temperature_2m']),
+    feels: _n(cur['apparent_temperature']),
+    humidity: _n(cur['relative_humidity_2m']),
+    wind: _n(cur['wind_speed_10m']),
+    pressureMm: _n(cur['pressure_msl']) * 0.75006,
+    cloud: _n(cur['cloud_cover']),
+    precip: _n(cur['precipitation']),
+    code: _n(cur['weather_code']).round(),
+    hours: hours,
+    daySum: _n(dd['precipitation_sum']?[0]),
+    dayProb: _n(dd['precipitation_probability_max']?[0]),
+    tMax: _n(dd['temperature_2m_max']?[0]),
+    tMin: _n(dd['temperature_2m_min']?[0]),
+    nowcast: nowcast,
+  );
 }
 
 // --------------------------------------------------------------- маршруты
