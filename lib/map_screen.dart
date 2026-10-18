@@ -534,7 +534,7 @@ class _MapScreenState extends State<MapScreen> {
       maxNativeZoom: maxZoom,
       panBuffer: 0,
       keepBuffer: 1,
-      tileDimension: low ? 512 : 256,
+      tileSize: low ? 512.0 : 256.0,
       zoomOffset: low ? -1 : 0,
       tileProvider: _tileProvider,
     );
