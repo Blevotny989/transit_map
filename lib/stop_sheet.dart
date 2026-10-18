@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'config.dart';
 import 'models.dart';
+import 'providers.dart';
 import 'services.dart';
 
 class StopSheet extends StatefulWidget {
@@ -20,13 +20,13 @@ class StopSheet extends StatefulWidget {
 
 class _StopSheetState extends State<StopSheet> {
   late Future<List<RouteInfo>> _routes;
-  late Future<List<Departure>> _deps;
+  late Future<DepartureResult> _deps;
 
   @override
   void initState() {
     super.initState();
     _routes = loadRoutesAtStop(widget.stop.pos);
-    _deps = loadDepartures(widget.stop.pos);
+    _deps = loadDeparturesSmart(widget.stop.pos);
   }
 
   @override
@@ -81,30 +81,33 @@ class _StopSheetState extends State<StopSheet> {
           const SizedBox(height: 18),
           Text('Расписание отправлений', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 6),
-          FutureBuilder<List<Departure>>(
+          FutureBuilder<DepartureResult>(
             future: _deps,
             builder: (_, snap) {
-              if (Config.transitlandKey.isEmpty) {
+              if (snap.connectionState != ConnectionState.done) return const LinearProgressIndicator();
+              if (snap.hasError) {
+                final noKey = snap.error is NoKeyException;
                 return Text(
-                    'Чтобы видеть расписание, введите бесплатный ключ Transitland в настройках '
-                    '(значок шестерёнки на карте).',
+                    noKey
+                        ? 'Чтобы видеть расписание, добавьте ключи HERE, Transitland или Яндекс.Расписаний '
+                            'в настройках (значок шестерёнки).'
+                        : 'Не удалось загрузить расписание',
                     style: TextStyle(color: cs.onSurfaceVariant));
               }
-              if (snap.connectionState != ConnectionState.done) return const LinearProgressIndicator();
-              if (snap.hasError) return const Text('Не удалось загрузить расписание');
-              final d = snap.data ?? [];
-              if (d.isEmpty) {
+              final r = snap.data!;
+              if (r.items.isEmpty) {
                 return Text('Для этой остановки расписание в открытых данных не найдено.',
                     style: TextStyle(color: cs.onSurfaceVariant));
               }
-              return Column(children: [
-                for (final x in d)
+              return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                for (final x in r.items)
                   ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     leading: Text(x.time, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
                     title: Text('${x.route}  ${x.headsign}'),
-                  )
+                  ),
+                Text('Данные: ${r.source}', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
               ]);
             },
           ),

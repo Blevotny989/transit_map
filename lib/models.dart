@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
+import 'config.dart';
 
 enum StopKind { bus, tram, train, subway, ferry }
 
@@ -29,13 +30,18 @@ extension StopKindX on StopKind {
       };
 }
 
+String pickName(Map<String, String> t, String fallback) =>
+    t['name:${Config.lang}'] ?? t['name'] ?? t['name:en'] ?? fallback;
+
 class Stop {
   final int id;
   final LatLng pos;
-  final String name;
   final StopKind kind;
   final Map<String, String> tags;
-  Stop(this.id, this.pos, this.name, this.kind, this.tags);
+  Stop(this.id, this.pos, this.kind, this.tags);
+
+  /// Название на выбранном в настройках языке.
+  String get name => pickName(tags, kind.label);
 
   static StopKind kindFromTags(Map<String, String> t) {
     if (t['amenity'] == 'ferry_terminal') return StopKind.ferry;
@@ -48,11 +54,12 @@ class Stop {
 
 /// Город, посёлок, деревня или хутор на карте.
 class PlaceDot {
-  final String name;
+  final Map<String, String> tags;
   final LatLng pos;
   final String kind; // city, town, village, hamlet
   final int? population;
-  PlaceDot(this.name, this.pos, this.kind, this.population);
+  PlaceDot(this.tags, this.pos, this.kind, this.population);
+  String get name => pickName(tags, '');
 }
 
 class RouteInfo {
@@ -90,12 +97,13 @@ class ObjectInfo {
       {this.wikiText, this.wikiImage, this.wikiUrl});
 }
 
-enum MapBase { scheme, topo, dark, osm, satellite, hybrid }
+enum MapBase { scheme, topo, vintage, dark, osm, satellite, hybrid }
 
 extension MapBaseX on MapBase {
   String get label => switch (this) {
         MapBase.scheme => 'Схема',
         MapBase.topo => 'Рельеф',
+        MapBase.vintage => 'Старинная',
         MapBase.dark => 'Тёмная',
         MapBase.osm => 'OSM',
         MapBase.satellite => 'Спутник',
@@ -104,6 +112,7 @@ extension MapBaseX on MapBase {
   IconData get icon => switch (this) {
         MapBase.scheme => Icons.map_outlined,
         MapBase.topo => Icons.terrain,
+        MapBase.vintage => Icons.explore,
         MapBase.dark => Icons.dark_mode_outlined,
         MapBase.osm => Icons.public,
         MapBase.satellite => Icons.satellite_alt,
@@ -155,7 +164,8 @@ class TransitPlan {
   final double seconds;
   final List<TransitLeg> legs;
   final bool estimated;
-  TransitPlan(this.seconds, this.legs, {this.estimated = false});
+  final String source;
+  TransitPlan(this.seconds, this.legs, {this.estimated = false, this.source = ''});
 
   int get transfers {
     final n = legs.where((l) => l.mode != 'WALK').length;

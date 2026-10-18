@@ -94,8 +94,17 @@ TransitLeg _ride(RouteInfo r, List<StopPt> s, List<double> cum, int i, int j) {
 double _total(List<TransitLeg> legs) =>
     legs.fold<double>(0, (a, l) => a + l.seconds + l.waitSeconds) / 60;
 
+/// Сначала ищет по ближайшим остановкам, а если ничего не нашлось, расширяет поиск.
 Future<List<TransitPlan>> planTransit(LatLng a, LatLng b) async {
-  final c = await Future.wait([loadCandidateRoutes(a, 500), loadCandidateRoutes(b, 500)]);
+  try {
+    return await _plan(a, b, 400);
+  } catch (_) {
+    return _plan(a, b, 1200);
+  }
+}
+
+Future<List<TransitPlan>> _plan(LatLng a, LatLng b, int radius) async {
+  final c = await Future.wait([loadCandidateRoutes(a, radius), loadCandidateRoutes(b, radius)]);
   final ca = c[0], cb = c[1];
   if (ca.isEmpty) {
     throw Exception('Рядом с точкой «откуда» нет остановок с маршрутами в OpenStreetMap');
@@ -195,7 +204,7 @@ Future<List<TransitPlan>> planTransit(LatLng a, LatLng b) async {
   final res = <TransitPlan>[];
   for (final o in opts) {
     if (!seen.add(o.sig)) continue;
-    res.add(TransitPlan(o.minutes * 60, o.legs, estimated: true));
+    res.add(TransitPlan(o.minutes * 60, o.legs, estimated: true, source: 'OpenStreetMap'));
     if (res.length >= 3) break;
   }
   return res;

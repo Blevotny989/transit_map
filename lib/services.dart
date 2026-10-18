@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' show sqrt;
 import 'package:flutter_map/flutter_map.dart';
@@ -5,12 +6,13 @@ import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'config.dart';
 import 'models.dart';
+import 'tile_store.dart';
 
-const _hdr = {'User-Agent': Config.userAgent, 'Accept-Language': 'ru'};
-final http.Client _client = http.Client();
+Map<String, String> get _hdr => {'User-Agent': Config.userAgent, 'Accept-Language': Config.lang};
+final http.Client httpClient = http.Client();
 
-Future<dynamic> _getJson(Uri uri) async {
-  final r = await _client.get(uri, headers: _hdr).timeout(const Duration(seconds: 25));
+Future<dynamic> getJson(Uri uri) async {
+  final r = await httpClient.get(uri, headers: _hdr).timeout(const Duration(seconds: 25));
   if (r.statusCode != 200) throw Exception('HTTP ${r.statusCode}');
   return jsonDecode(utf8.decode(r.bodyBytes));
 }
@@ -21,77 +23,175 @@ const _mirrors = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 
-/// Запрос к Overpass с переключением на запасные серверы.
+Future<dynamic> _overpassOne(String url, String query) async {
+  final r = await httpClient
+      .post(Uri.parse(url), headers: _hdr, body: {'data': query})
+      .timeout(const Duration(seconds: 25));
+  if (r.statusCode != 200) throw Exception('Overpass HTTP ${r.statusCode}');
+  return jsonDecode(utf8.decode(r.bodyBytes));
+}
+
+Future<T> _firstSuccess<T>(List<Future<T>> fs) {
+  final c = Completer<T>();
+  var failed = 0;
+  for (final f in fs) {
+    f.then((v) {
+      if (!c.isCompleted) c.complete(v);
+    }).catchError((Object e) {
+      failed++;
+      if (failed == fs.length && !c.isCompleted) c.completeError(e);
+    });
+  }
+  return c.future;
+}
+
+/// Запрос к Overpass: два сервера одновременно, побеждает самый быстрый.
 Future<dynamic> _overpass(String query) async {
-  Object? last;
-  for (final url in _mirrors) {
-    try {
-      final r = await _client
-          .post(Uri.parse(url), headers: _hdr, body: {'data': query})
-          .timeout(const Duration(seconds: 30));
-      if (r.statusCode == 200) return jsonDecode(utf8.decode(r.bodyBytes));
-      last = 'HTTP ${r.statusCode}';
-    } catch (e) {
-      last = e;
-    }
+  try {
+    return await _firstSuccess([
+      _overpassOne(_mirrors[0], query),
+      _overpassOne(_mirrors[1], query),
+    ]);
+  } catch (_) {}
+  try {
+    return await _overpassOne(_mirrors[2], query);
+  } catch (e) {
+    throw Exception('Сервер данных недоступен');
   }
-  throw Exception('Сервер данных недоступен: $last');
 }
 
-String _bbox(LatLngBounds b) => '${b.south},${b.west},${b.north},${b.east}';
+// ------------------------------------------------ плиточные хранилища данных
+const _keepTags = {
+  'name', 'highway', 'railway', 'amenity', 'station', 'subway', 'public_transport',
+  'operator', 'network', 'opening_hours', 'interval', 'wheelchair', 'shelter', 'bench',
+  'place', 'population', 'ref',
+};
 
-// ---------------------------------------------------------------- остановки
-Future<List<Stop>> loadStops(LatLngBounds b) async {
-  final bb = _bbox(b);
-  final q = '[out:json][timeout:25];('
-      'nwr["highway"="bus_stop"]($bb);'
-      'nwr["railway"~"^(station|halt|tram_stop)\$"]($bb);'
-      'nwr["amenity"~"^(ferry_terminal|bus_station)\$"]($bb);'
-      ');out center 400;';
-  final data = await _overpass(q);
-  final res = <Stop>[];
-  for (final e in (data['elements'] as List)) {
-    final c = e['center'] as Map?;
-    final lat = (e['lat'] ?? c?['lat']) as num?;
-    final lon = (e['lon'] ?? c?['lon']) as num?;
-    if (lat == null || lon == null) continue;
-    final tags = <String, String>{
-      for (final en in (e['tags'] as Map? ?? {}).entries) '${en.key}': '${en.value}'
+Map<String, String> _slimTags(Map? raw) => {
+      for (final en in (raw ?? {}).entries)
+        if ('${en.key}'.startsWith('name') || _keepTags.contains('${en.key}'))
+          '${en.key}': '${en.value}'
     };
-    final kind = Stop.kindFromTags(tags);
-    res.add(Stop(
-      e['id'] as int,
-      LatLng(lat.toDouble(), lon.toDouble()),
-      tags['name:ru'] ?? tags['name'] ?? kind.label,
-      kind,
-      tags,
-    ));
-  }
-  return res;
+
+LatLng? _elPos(Map e) {
+  final c = e['center'] as Map?;
+  final lat = (e['lat'] ?? c?['lat']) as num?;
+  final lon = (e['lon'] ?? c?['lon']) as num?;
+  if (lat == null || lon == null) return null;
+  return LatLng(lat.toDouble(), lon.toDouble());
 }
 
-// ------------------------------------------------- города, деревни, посёлки
-Future<List<PlaceDot>> loadPlaceDots(LatLngBounds b, double zoom) async {
-  final kinds = zoom < 10
-      ? 'city|town'
-      : zoom < 12
-          ? 'city|town|village'
-          : 'city|town|village|hamlet';
-  final q = '[out:json][timeout:25];'
-      'node["place"~"^($kinds)\$"]["name"](${_bbox(b)});out 400;';
-  final data = await _overpass(q);
-  const order = {'city': 0, 'town': 1, 'village': 2, 'hamlet': 3};
-  final res = <PlaceDot>[];
-  for (final e in (data['elements'] as List)) {
-    final t = Map<String, dynamic>.from(e['tags'] ?? {});
-    final lat = e['lat'] as num?;
-    final lon = e['lon'] as num?;
-    if (lat == null || lon == null) continue;
-    res.add(PlaceDot('${t['name:ru'] ?? t['name']}', LatLng(lat.toDouble(), lon.toDouble()),
-        '${t['place']}', int.tryParse('${t['population'] ?? ''}')));
-  }
-  res.sort((a, b) => (order[a.kind] ?? 9).compareTo(order[b.kind] ?? 9));
-  return res;
+Stop? _parseStop(Map e) {
+  final pos = _elPos(e);
+  if (pos == null) return null;
+  final tags = _slimTags(e['tags'] as Map?);
+  return Stop(e['id'] as int, pos, Stop.kindFromTags(tags), tags);
+}
+
+Map<String, dynamic> _encStop(Stop s) => {'i': s.id, 'a': s.pos.latitude, 'o': s.pos.longitude, 't': s.tags};
+
+Stop _decStop(Map<String, dynamic> m) {
+  final tags = Map<String, String>.from(m['t'] as Map);
+  return Stop(m['i'] as int, LatLng((m['a'] as num).toDouble(), (m['o'] as num).toDouble()),
+      Stop.kindFromTags(tags), tags);
+}
+
+PlaceDot? _parsePlace(Map e) {
+  final pos = _elPos(e);
+  if (pos == null) return null;
+  final tags = _slimTags(e['tags'] as Map?);
+  if (!tags.containsKey('name')) return null;
+  return PlaceDot(tags, pos, tags['place'] ?? 'village', int.tryParse(tags['population'] ?? ''));
+}
+
+Map<String, dynamic> _encPlace(PlaceDot d) =>
+    {'a': d.pos.latitude, 'o': d.pos.longitude, 't': d.tags};
+
+PlaceDot _decPlace(Map<String, dynamic> m) {
+  final tags = Map<String, String>.from(m['t'] as Map);
+  return PlaceDot(tags, LatLng((m['a'] as num).toDouble(), (m['o'] as num).toDouble()),
+      tags['place'] ?? 'village', int.tryParse(tags['population'] ?? ''));
+}
+
+/// Все остановки (автобус, трамвай, метро, вокзалы, паромы).
+final stopStore = TileStore<Stop>(
+  name: 'stops',
+  z: 14,
+  clause: (bb) => 'nwr["highway"="bus_stop"]($bb);'
+      'nwr["railway"~"^(station|halt|tram_stop)\$"]($bb);'
+      'nwr["amenity"~"^(ferry_terminal|bus_station)\$"]($bb);',
+  parse: _parseStop,
+  posOf: (s) => s.pos,
+  enc: _encStop,
+  dec: _decStop,
+  fetch: _overpass,
+);
+
+/// Только станции и вокзалы (видны раньше, чем остановки).
+final stationStore = TileStore<Stop>(
+  name: 'stations',
+  z: 11,
+  clause: (bb) => 'nwr["railway"="station"]($bb);nwr["amenity"="ferry_terminal"]($bb);',
+  parse: _parseStop,
+  posOf: (s) => s.pos,
+  enc: _encStop,
+  dec: _decStop,
+  fetch: _overpass,
+);
+
+final bigPlaceStore = TileStore<PlaceDot>(
+  name: 'pbig',
+  z: 8,
+  clause: (bb) => 'node["place"~"^(city|town)\$"]["name"]($bb);',
+  parse: _parsePlace,
+  posOf: (d) => d.pos,
+  enc: _encPlace,
+  dec: _decPlace,
+  fetch: _overpass,
+);
+
+final smallPlaceStore = TileStore<PlaceDot>(
+  name: 'psmall',
+  z: 11,
+  clause: (bb) => 'node["place"~"^(village|hamlet)\$"]["name"]($bb);',
+  parse: _parsePlace,
+  posOf: (d) => d.pos,
+  enc: _encPlace,
+  dec: _decPlace,
+  fetch: _overpass,
+);
+
+/// Сначала остановки вдоль построенного пути, потом соседние плитки.
+Future<void> prefetchStopsAlong(List<LatLng> pts) async {
+  if (pts.length < 2) return;
+  try {
+    final corridor = <String, TileId>{};
+    void add(LatLng p) {
+      final t = TileId(lonToTileX(p.longitude, 14), latToTileY(p.latitude, 14));
+      if (corridor.length < 80) corridor[t.key] = t;
+    }
+
+    for (var i = 0; i < pts.length - 1; i++) {
+      final a = pts[i], b = pts[i + 1];
+      final dy = b.latitude - a.latitude, dx = b.longitude - a.longitude;
+      final n = (sqrt(dx * dx + dy * dy) / 0.0025).ceil().clamp(1, 400);
+      for (var k = 0; k <= n; k++) {
+        add(LatLng(a.latitude + dy * k / n, a.longitude + dx * k / n));
+      }
+      if (corridor.length >= 80) break;
+    }
+    await stopStore.ensure(corridor.values.toList());
+    final ring = <String, TileId>{};
+    for (final t in corridor.values) {
+      for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+          final r = TileId(t.x + dx, t.y + dy);
+          if (!corridor.containsKey(r.key)) ring[r.key] = r;
+        }
+      }
+    }
+    await stopStore.ensure(ring.values.take(60).toList());
+  } catch (_) {}
 }
 
 // ------------------------------------------------------ маршруты на остановке
@@ -207,34 +307,38 @@ Future<List<List<LatLng>>> loadRouteGeometry(int relId) async {
 
 // ------------------------------------------------------------------- поиск
 final Map<String, List<Place>> _searchCache = {};
+const photonLangs = {'en', 'de', 'fr', 'it'};
 
-Future<List<Place>> searchPlaces(String query, LatLng bias) async {
-  final ck = query.trim().toLowerCase();
-  final cached = _searchCache[ck];
-  if (cached != null) return cached;
-  try {
-    final data = await _getJson(Uri.https('photon.komoot.io', '/api/', {
-      'q': query,
-      'limit': '6',
-      'lat': '${bias.latitude}',
-      'lon': '${bias.longitude}',
-    }));
-    final out = <Place>[];
-    for (final f in (data['features'] as List)) {
-      final p = Map<String, dynamic>.from(f['properties'] ?? {});
-      final c = f['geometry']['coordinates'] as List;
-      final name = '${p['name'] ?? p['street'] ?? ''}';
-      if (name.isEmpty) continue;
-      final sub = [p['street'], p['city'], p['state'], p['country']]
-          .where((x) => x != null && '$x'.isNotEmpty && '$x' != name)
-          .join(', ');
-      out.add(Place(name, LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()), sub));
-    }
-    if (out.isNotEmpty) return _searchCache[ck] = out;
-  } catch (_) {}
-  // запасной вариант — Nominatim
-  final data = await _getJson(Uri.https('nominatim.openstreetmap.org', '/search',
-      {'q': query, 'format': 'json', 'limit': '8', 'accept-language': 'ru'})) as List;
+Future<List<Place>> _searchPhoton(String query, LatLng bias) async {
+  final data = await getJson(Uri.https('photon.komoot.io', '/api/', {
+    'q': query,
+    'limit': '6',
+    'lat': '${bias.latitude}',
+    'lon': '${bias.longitude}',
+    if (photonLangs.contains(Config.lang)) 'lang': Config.lang,
+  }));
+  final out = <Place>[];
+  for (final f in (data['features'] as List)) {
+    final p = Map<String, dynamic>.from(f['properties'] ?? {});
+    final c = f['geometry']['coordinates'] as List;
+    final name = '${p['name'] ?? p['street'] ?? ''}';
+    if (name.isEmpty) continue;
+    final sub = [p['street'], p['city'], p['state'], p['country']]
+        .where((x) => x != null && '$x'.isNotEmpty && '$x' != name)
+        .join(', ');
+    out.add(Place(name, LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()), sub));
+  }
+  return out;
+}
+
+Future<List<Place>> _searchNominatim(String query) async {
+  final data = await getJson(Uri.https('nominatim.openstreetmap.org', '/search', {
+    'q': query,
+    'format': 'json',
+    'limit': '6',
+    'dedupe': '1',
+    'accept-language': Config.lang,
+  })) as List;
   return [
     for (final e in data)
       Place(
@@ -243,6 +347,26 @@ Future<List<Place>> searchPlaces(String query, LatLng bias) async {
         '${e['display_name']}'.split(',').skip(1).join(',').trim(),
       )
   ];
+}
+
+/// Поиск мест на выбранном в настройках языке. Nominatim знает названия на всех языках,
+/// Photon быстрее, но понимает только en/de/fr/it.
+Future<List<Place>> searchPlaces(String query, LatLng bias) async {
+  final ck = '${Config.lang}|${query.trim().toLowerCase()}';
+  final cached = _searchCache[ck];
+  if (cached != null) return cached;
+  final photonFirst = photonLangs.contains(Config.lang);
+  Object? err;
+  for (final usePhoton in photonFirst ? [true, false] : [false, true]) {
+    try {
+      final r = usePhoton ? await _searchPhoton(query, bias) : await _searchNominatim(query);
+      if (r.isNotEmpty) return _searchCache[ck] = r;
+    } catch (e) {
+      err = e;
+    }
+  }
+  if (err != null) throw err;
+  return [];
 }
 
 // ------------------------------------------------------- сводка об объекте
@@ -293,7 +417,7 @@ const _typeRu = {
 
 Future<ObjectInfo> loadObjectInfo(LatLng p, double mapZoom) async {
   final z = (mapZoom + 1).round().clamp(5, 18);
-  final d = await _getJson(Uri.https('nominatim.openstreetmap.org', '/reverse', {
+  final d = await getJson(Uri.https('nominatim.openstreetmap.org', '/reverse', {
     'format': 'jsonv2',
     'lat': '${p.latitude}',
     'lon': '${p.longitude}',
@@ -334,7 +458,7 @@ Future<ObjectInfo> loadObjectInfo(LatLng p, double mapZoom) async {
   if (w is String && w.contains(':')) {
     try {
       final i = w.indexOf(':');
-      final s = await _getJson(Uri.https('${w.substring(0, i)}.wikipedia.org',
+      final s = await getJson(Uri.https('${w.substring(0, i)}.wikipedia.org',
           '/api/rest_v1/page/summary/${w.substring(i + 1)}'));
       wText = s['extract'] as String?;
       wImg = s['thumbnail']?['source'] as String?;
@@ -347,7 +471,7 @@ Future<ObjectInfo> loadObjectInfo(LatLng p, double mapZoom) async {
 
 // ------------------------------------------------------------------ радар
 Future<RadarData> loadRadar() async {
-  final d = await _getJson(Uri.parse('https://api.rainviewer.com/public/weather-maps.json'));
+  final d = await getJson(Uri.parse('https://api.rainviewer.com/public/weather-maps.json'));
   final past = (d['radar']['past'] as List?) ?? [];
   final now = (d['radar']['nowcast'] as List?) ?? [];
   final frames = <RadarFrame>[
@@ -362,7 +486,7 @@ Future<RadarData> loadRadar() async {
 double _n(dynamic v) => v is num ? v.toDouble() : 0.0;
 
 Future<WeatherInfo> loadWeather(LatLng p) async {
-  final d = await _getJson(Uri.https('api.open-meteo.com', '/v1/forecast', {
+  final d = await getJson(Uri.https('api.open-meteo.com', '/v1/forecast', {
     'latitude': '${p.latitude}',
     'longitude': '${p.longitude}',
     'current': 'temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,'
@@ -444,7 +568,7 @@ Future<RouteResult> buildRoute(LatLng a, LatLng b, RouteMode mode) async {
   final uri = Uri.parse('https://routing.openstreetmap.de/$profile/route/v1/driving/'
       '${a.longitude},${a.latitude};${b.longitude},${b.latitude}'
       '?overview=full&geometries=geojson');
-  final data = await _getJson(uri);
+  final data = await getJson(uri);
   if (data['routes'] == null || (data['routes'] as List).isEmpty) {
     throw Exception('Маршрут не найден');
   }
@@ -460,12 +584,12 @@ Future<List<TransitPlan>> buildTransitPlans(LatLng a, LatLng b) async {
   final uri = Uri.parse('${Config.otpUrl}/otp/routers/default/plan'
       '?fromPlace=${a.latitude},${a.longitude}&toPlace=${b.latitude},${b.longitude}'
       '&mode=TRANSIT,WALK&numItineraries=3');
-  final data = await _getJson(uri);
+  final data = await getJson(uri);
   final its = (data['plan']?['itineraries'] as List?) ?? [];
   if (its.isEmpty) throw Exception('Маршрут на транспорте не найден');
   return [
     for (final it in its)
-      TransitPlan((it['duration'] as num).toDouble(), [
+      TransitPlan((it['duration'] as num).toDouble(), source: 'OpenTripPlanner', legs: [
         for (final l in (it['legs'] as List))
           TransitLeg(
             '${l['mode']}',
@@ -477,33 +601,6 @@ Future<List<TransitPlan>> buildTransitPlans(LatLng a, LatLng b) async {
           )
       ])
   ];
-}
-
-Future<List<Departure>> loadDepartures(LatLng pos) async {
-  final key = Config.transitlandKey;
-  if (key.isEmpty) return [];
-  final stops = await _getJson(Uri.https('transit.land', '/api/v2/rest/stops', {
-    'lat': '${pos.latitude}',
-    'lon': '${pos.longitude}',
-    'radius': '120',
-    'limit': '1',
-    'apikey': key,
-  }));
-  final list = (stops['stops'] as List?) ?? [];
-  if (list.isEmpty) return [];
-  final id = Uri.encodeComponent('${list[0]['onestop_id']}');
-  final dep = await _getJson(Uri.parse(
-      'https://transit.land/api/v2/rest/stops/$id/departures?limit=12&apikey=$key'));
-  final out = <Departure>[];
-  for (final s in (dep['stops'] as List? ?? [])) {
-    for (final d in (s['departures'] as List? ?? [])) {
-      final time = '${d['departure']?['estimated'] ?? d['departure']?['scheduled'] ?? ''}';
-      final route = '${d['trip']?['route']?['route_short_name'] ?? ''}';
-      final head = '${d['trip']?['trip_headsign'] ?? ''}';
-      out.add(Departure(time.length >= 5 ? time.substring(0, 5) : time, route, head));
-    }
-  }
-  return out;
 }
 
 List<LatLng> decodePolyline(String s) {

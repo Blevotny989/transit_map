@@ -1,32 +1,32 @@
 import 'package:flutter/material.dart';
+import 'app_theme.dart';
 import 'config.dart';
 import 'map_screen.dart';
+import 'tile_cache.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Config.load();
+  await initTileCache();
   runApp(const TransitApp());
 }
 
 class TransitApp extends StatelessWidget {
   const TransitApp({super.key});
 
-  ThemeData _theme(Brightness b) => ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1E6FD9), brightness: b),
-        cardTheme: CardThemeData(
-          elevation: 4,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
-      );
-
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'Транспортная карта',
-        debugShowCheckedModeBanner: false,
-        theme: _theme(Brightness.light),
-        darkTheme: _theme(Brightness.dark),
-        themeMode: ThemeMode.system,
-        home: const MapScreen(),
+  Widget build(BuildContext context) => ValueListenableBuilder<String>(
+        valueListenable: Config.theme,
+        builder: (_, t, __) {
+          final pirate = t == 'pirate';
+          return MaterialApp(
+            title: 'Транспортная карта',
+            debugShowCheckedModeBanner: false,
+            theme: pirate ? pirateTheme() : modernTheme(Brightness.light),
+            darkTheme: pirate ? pirateTheme() : modernTheme(Brightness.dark),
+            themeMode: pirate ? ThemeMode.light : ThemeMode.system,
+            home: const MapScreen(),
+          );
+        },
       );
 }
