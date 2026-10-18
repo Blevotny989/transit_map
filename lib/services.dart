@@ -589,7 +589,7 @@ Future<List<TransitPlan>> buildTransitPlans(LatLng a, LatLng b) async {
   if (its.isEmpty) throw Exception('Маршрут на транспорте не найден');
   return [
     for (final it in its)
-      TransitPlan((it['duration'] as num).toDouble(), source: 'OpenTripPlanner', legs: [
+      TransitPlan((it['duration'] as num).toDouble(), [
         for (final l in (it['legs'] as List))
           TransitLeg(
             '${l['mode']}',
@@ -599,7 +599,7 @@ Future<List<TransitPlan>> buildTransitPlans(LatLng a, LatLng b) async {
             (l['duration'] as num).toDouble(),
             decodePolyline('${l['legGeometry']?['points'] ?? ''}'),
           )
-      ])
+      ], source: 'OpenTripPlanner')
   ];
 }
 
