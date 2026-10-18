@@ -625,4 +625,3 @@ List<LatLng> decodePolyline(String s) {
   }
   return pts;
 }
-
