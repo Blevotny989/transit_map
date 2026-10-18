@@ -1,19 +1,29 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import 'app_theme.dart';
+import 'boot.dart';
 import 'config.dart';
 import 'info_sheet.dart';
+import 'location_service.dart';
 import 'models.dart';
 import 'place_picker.dart';
 import 'providers.dart';
+import 'sea_lore.dart';
 import 'services.dart';
 import 'settings_dialog.dart';
 import 'stop_sheet.dart';
+import 'stops_layer.dart';
 import 'tile_cache.dart';
 import 'vintage_overlay.dart';
+
+/// Слой подложки: шаблон адреса плиток и максимальный масштаб, на котором они есть.
+class _Layer {
+  final String url;
+  final int maxZoom;
+  _Layer(this.url, [this.maxZoom = 19]);
+}
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -26,18 +36,19 @@ class _MapScreenState extends State<MapScreen> {
 
   final _map = MapController();
   final _searchCtrl = TextEditingController();
-  Timer? _fetchTimer, _visTimer, _searchDebounce, _radarTimer;
+  Timer? _fetchTimer, _idleTimer, _saveTimer, _searchDebounce, _radarTimer;
   late final TileProvider _tileProvider;
   bool _mapReady = false;
+  final ValueNotifier<int> _repaint = ValueNotifier<int>(0);
 
   // карта
   MapBase _base = MapBase.scheme;
-  int _zoomB = 12;
-  List<Stop> _stops = [];
-  List<PlaceDot> _dots = [];
   final Set<StopKind> _kinds = {...StopKind.values};
   bool _loading = false;
   String? _hint;
+  bool _userMoved = false, _hadSavedView = false, _bootDone = false, _locating = false;
+  double _meAcc = 0;
+  bool _meApprox = false;
 
   // радар
   bool _radarOn = false;
@@ -74,6 +85,8 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
+    _base = MapBase.values.firstWhere((b) => b.name == Config.baseName, orElse: () => MapBase.scheme);
+    _hadSavedView = Config.lastLat != null && Config.lastLon != null;
     _tileProvider = NetworkTileProvider(httpClient: tileClient);
     stopStore.onChange = _refreshVisible;
     stationStore.onChange = _refreshVisible;
@@ -88,54 +101,52 @@ class _MapScreenState extends State<MapScreen> {
     bigPlaceStore.onChange = null;
     smallPlaceStore.onChange = null;
     _fetchTimer?.cancel();
-    _visTimer?.cancel();
+    _idleTimer?.cancel();
+    _saveTimer?.cancel();
     _searchDebounce?.cancel();
     _radarTimer?.cancel();
+    LocationService.stopWatching();
+    _repaint.dispose();
     super.dispose();
   }
 
   void _snack(String t) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
 
-  // ------------------------------------------------ загрузка объектов карты
-  void _onMove(MapCamera cam) {
-    final zb = cam.zoom.floor();
-    if (zb != _zoomB) setState(() => _zoomB = zb);
-    _visTimer ??= Timer(const Duration(milliseconds: 120), () {
-      _visTimer = null;
-      _refreshVisible();
-    });
-    _fetchTimer?.cancel();
-    _fetchTimer = Timer(const Duration(milliseconds: 300), _fetch);
+  void _bootReady() {
+    if (_bootDone) return;
+    _bootDone = true;
+    Boot.done();
   }
 
-  /// Показывает только то, что попадает на экран.
-  void _refreshVisible() {
-    if (!mounted || !_mapReady) return;
-    final cam = _map.camera;
-    final z = cam.zoom, vb = cam.visibleBounds;
-    var stops = <Stop>[];
-    var dots = <PlaceDot>[];
-    if (z >= Config.minStopsZoom) {
-      stops = stopStore.visible(vb, max: 600).where((s) => _kinds.contains(s.kind)).toList();
-    } else {
-      if (z >= Config.minStationsZoom) {
-        stops = stationStore.visible(vb, max: 300).where((s) => _kinds.contains(s.kind)).toList();
-      }
-      if (z >= 8) {
-        dots = bigPlaceStore.visible(vb, max: 400);
-        if (z >= 10) {
-          dots = [
-            ...dots,
-            ...smallPlaceStore.visible(vb, max: 500).where((d) => z >= 12 || d.kind == 'village'),
-          ];
-        }
-      }
-    }
-    setState(() {
-      _stops = stops;
-      _dots = dots;
+  // ------------------------------------------------ загрузка объектов карты
+  void _onMove(MapCamera cam, bool gesture) {
+    if (gesture) _userMoved = true;
+    cancelTilePrefetch();
+    _fetchTimer?.cancel();
+    _fetchTimer = Timer(const Duration(milliseconds: 140), _fetch);
+    _idleTimer?.cancel();
+    _idleTimer = Timer(const Duration(milliseconds: 1000), _prefetchAround);
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (!mounted || !_mapReady) return;
+      final c = _map.camera;
+      Config.lastLat = c.center.latitude;
+      Config.lastLon = c.center.longitude;
+      Config.lastZoom = c.zoom;
+      Config.saveView();
     });
   }
+
+  /// Остановки и города рисуются прямо на холсте и сами следуют за картой;
+  /// здесь только просим перерисовать и обновляем индикатор загрузки.
+  void _refreshVisible() {
+    if (!mounted) return;
+    _repaint.value++;
+    final busy = stopStore.pending + stationStore.pending + bigPlaceStore.pending + smallPlaceStore.pending > 0;
+    if (busy != _loading) setState(() => _loading = busy);
+  }
+
+  bool _anyStops(LatLngBounds vb) => stopStore.visible(vb, max: 3000).any((s) => _kinds.contains(s.kind));
 
   Future<void> _fetch() async {
     if (!_mapReady || !mounted) return;
@@ -149,14 +160,16 @@ class _MapScreenState extends State<MapScreen> {
     } else if (z < Config.minStopsZoom) {
       hint = 'Приблизьте карту ещё немного, чтобы увидеть остановки';
     }
-    setState(() => _hint = hint);
+    if (hint != _hint) setState(() => _hint = hint);
     _refreshVisible();
-    if (z < 8) return;
-    setState(() => _loading = true);
+    if (z < 8) {
+      _bootReady();
+      return;
+    }
     try {
       final fs = <Future<void>>[];
       if (z >= Config.minStopsZoom) {
-        fs.add(stopStore.ensureBounds(vb, maxTiles: 24));
+        fs.add(stopStore.ensureBounds(vb, maxTiles: 40));
       } else {
         fs.add(bigPlaceStore.ensureBounds(vb, maxTiles: 12));
         if (z >= 10) fs.add(smallPlaceStore.ensureBounds(vb, maxTiles: 9));
@@ -164,13 +177,37 @@ class _MapScreenState extends State<MapScreen> {
       }
       await Future.wait(fs);
       _refreshVisible();
-      if (mounted && z >= Config.minStopsZoom && _stops.isEmpty) {
+      if (mounted && z >= Config.minStopsZoom && stopStore.pending == 0 && !_anyStops(vb)) {
         setState(() => _hint = 'В этой области остановок в OpenStreetMap нет');
       }
     } catch (_) {
       if (mounted) setState(() => _hint = 'Не удалось загрузить данные, попробуйте ещё раз');
     } finally {
-      if (mounted) setState(() => _loading = false);
+      _bootReady();
+    }
+  }
+
+  /// Когда карта остановилась: тихо подгружаем соседние области и соседние масштабы,
+  /// чтобы сдвиг и приближение показывались без ожидания.
+  Future<void> _prefetchAround() async {
+    if (!mounted || !_mapReady) return;
+    final cam = _map.camera;
+    final z = cam.zoom, vb = cam.visibleBounds;
+    try {
+      if (z >= Config.minStopsZoom) {
+        await stopStore.ensureRing(vb, maxTiles: 18);
+      } else if (z >= 8) {
+        await bigPlaceStore.ensureRing(vb, maxTiles: 8);
+      }
+    } catch (_) {}
+    if (!mounted) return;
+    final zi = z.floor();
+    for (final dz in const [1, -1]) {
+      final tz = zi + dz;
+      for (final sp in _baseSpecs(_base)) {
+        if (tz < 1 || tz > sp.maxZoom) continue;
+        unawaited(prefetchTiles(sp.url, cam.center, tz, radiusX: dz > 0 ? 2 : 1, radiusY: dz > 0 ? 1 : 0));
+      }
     }
   }
 
@@ -211,21 +248,98 @@ class _MapScreenState extends State<MapScreen> {
     _showInfo(p.pos, hint: p.name);
   }
 
-  Future<void> _locate({bool move = true}) async {
+  void _applyFix(LocFix f, {required bool move}) {
+    if (!mounted) return;
+    setState(() {
+      _me = f.pos;
+      _meAcc = f.accuracy;
+      _meApprox = f.approximate;
+    });
+    if (move) _map.move(f.pos, f.approximate ? 11.0 : 16.0);
+  }
+
+  /// Положение: Windows спрашивает разрешение, карта использует ответ.
+  /// При запуске ([auto]) никаких окон: если нельзя, тихо берём примерное место по IP.
+  Future<void> _locate({bool move = true, bool auto = false}) async {
+    if (_locating) return;
+    _locating = true;
     try {
-      var perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
-      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
-        _snack('Нет доступа к геолокации');
+      final r = await LocationService.locate();
+      if (!mounted) return;
+      final fix = r.fix;
+      if (fix != null) {
+        _applyFix(fix, move: auto ? (!_userMoved && !_hadSavedView) : move);
+        LocationService.startWatching((f) {
+          if (!mounted) return;
+          setState(() {
+            _me = f.pos;
+            _meAcc = f.accuracy;
+            _meApprox = false;
+          });
+        });
         return;
       }
-      final p = await Geolocator.getCurrentPosition();
-      final ll = LatLng(p.latitude, p.longitude);
-      setState(() => _me = ll);
-      if (move) _map.move(ll, 16);
-    } catch (_) {
-      _snack('Не удалось определить положение');
+      if (auto) {
+        final ip = await LocationService.byIp();
+        if (ip != null) _applyFix(ip, move: !_userMoved && !_hadSavedView);
+        return;
+      }
+      await _explainLocation(r.status, move);
+    } finally {
+      _locating = false;
     }
+  }
+
+  Future<void> _explainLocation(LocStatus st, bool move) async {
+    final String msg;
+    if (st == LocStatus.timeout) {
+      msg = 'Windows не успел определить положение. На компьютере без GPS оно определяется по Wi-Fi '
+          'и может занять время. Попробуйте ещё раз.';
+    } else if (st == LocStatus.error) {
+      msg = 'Не удалось определить положение.';
+    } else {
+      msg = 'Windows не разрешает программе узнать ваше положение.\n\n'
+          'Откройте «Параметры → Конфиденциальность и защита → Расположение», включите «Службы определения '
+          'расположения» и «Разрешить классическим приложениям доступ к вашему расположению», затем нажмите '
+          'кнопку положения ещё раз.';
+    }
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Положение не определено'),
+        content: Text(msg),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, 'close'), child: const Text('Закрыть')),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'ip'), child: const Text('Примерно, по IP')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, 'settings'), child: const Text('Открыть параметры')),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (choice == 'settings') {
+      await LocationService.openSettings();
+    } else if (choice == 'ip') {
+      final ip = await LocationService.byIp();
+      if (!mounted) return;
+      if (ip == null) {
+        _snack('Не удалось определить положение по IP');
+      } else {
+        _applyFix(ip, move: move);
+        final place = ip.place;
+        _snack(place != null && place.isNotEmpty ? 'Примерное положение: $place' : 'Показано примерное положение');
+      }
+    }
+  }
+
+  void _showLore(LoreItem it) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(it.title),
+        content: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 420), child: Text(it.text)),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Закрыть'))],
+      ),
+    );
   }
 
   // ---------------------------------------------------------- сводка объекта
@@ -502,7 +616,10 @@ class _MapScreenState extends State<MapScreen> {
                   selected: _base == b,
                   onSelected: (_) {
                     setState(() => _base = b);
+                    Config.baseName = b.name;
+                    Config.saveView();
                     setS(() {});
+                    _fetch();
                   },
                 )
             ]),
@@ -524,50 +641,54 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   // ------------------------------------------------------------------ тайлы
-  /// Грузятся только видимые плитки. Пока карта не приближена, берутся плитки
-  /// на уровень крупнее и растягиваются: в 4 раза меньше загрузки, почти незаметно.
-  TileLayer _tile(String url, {int maxZoom = 19}) {
-    final low = _zoomB < 15;
-    return TileLayer(
-      urlTemplate: url,
-      userAgentPackageName: 'com.example.transit_map',
-      maxNativeZoom: maxZoom,
-      panBuffer: 0,
-      keepBuffer: 1,
-      tileSize: low ? 512.0 : 256.0,
-      zoomOffset: low ? -1 : 0,
-      tileProvider: _tileProvider,
-    );
-  }
+  static const _clarity = 'https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+
+  /// Какие плитки нужны для выбранной подложки (используется и для подгрузки заранее).
+  List<_Layer> _baseSpecs(MapBase b) => switch (b) {
+        MapBase.scheme => [_Layer('$_esri/World_Street_Map/MapServer/tile/{z}/{y}/{x}')],
+        MapBase.topo || MapBase.vintage => [_Layer('$_esri/World_Topo_Map/MapServer/tile/{z}/{y}/{x}')],
+        MapBase.dark => [
+            _Layer('$_esri/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', 16),
+            _Layer('$_esri/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', 16),
+          ],
+        MapBase.osm => [_Layer('https://tile.openstreetmap.org/{z}/{x}/{y}.png')],
+        // Clarity: самые свежие и чёткие снимки Esri; где их нет, берётся обычный World Imagery
+        MapBase.satellite => [_Layer(_clarity, 19)],
+        MapBase.hybrid => [
+            _Layer(_clarity, 19),
+            _Layer('$_esri/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', 18),
+            _Layer('$_esri/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', 18),
+          ],
+      };
+
+  /// Старинная карта: тёплая бумага, суша светлее моря, подписи тёмно-коричневыми чернилами.
+  /// Названия остаются современными, меняются только краски.
+  static const List<double> _vintageMatrix = <double>[
+    1.135, -0.291, -0.059, 0, 49.5,
+    0.397, 0.365, 0.053, 0, 30.5,
+    0.288, -0.037, 0.515, 0, 13.3,
+    0, 0, 0, 1, 0,
+  ];
+
+  /// Грузятся только видимые плитки плюс два ряда запаса вокруг: край экрана не мигает пустотой.
+  /// Плитки появляются сразу, без плавного проявления.
+  TileLayer _tile(_Layer l) => TileLayer(
+        urlTemplate: l.url,
+        userAgentPackageName: 'com.example.transit_map',
+        maxNativeZoom: l.maxZoom,
+        panBuffer: 2,
+        keepBuffer: 4,
+        tileDisplay: TileDisplay.instantaneous(),
+        tileProvider: _tileProvider,
+      );
 
   List<Widget> _tileLayers() {
     final layers = <Widget>[];
-    switch (_base) {
-      case MapBase.scheme:
-        layers.add(_tile('$_esri/World_Street_Map/MapServer/tile/{z}/{y}/{x}'));
-      case MapBase.topo:
-        layers.add(_tile('$_esri/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'));
-      case MapBase.vintage:
-        layers.add(ColorFiltered(
-          colorFilter: const ColorFilter.matrix(<double>[
-            0.393, 0.769, 0.189, 0, 14,
-            0.349, 0.686, 0.168, 0, 6,
-            0.272, 0.534, 0.131, 0, 0,
-            0, 0, 0, 1, 0,
-          ]),
-          child: _tile('$_esri/World_Topo_Map/MapServer/tile/{z}/{y}/{x}'),
-        ));
-      case MapBase.dark:
-        layers.add(_tile('$_esri/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', maxZoom: 16));
-        layers.add(_tile('$_esri/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', maxZoom: 16));
-      case MapBase.osm:
-        layers.add(_tile('https://tile.openstreetmap.org/{z}/{x}/{y}.png'));
-      case MapBase.satellite:
-        layers.add(_tile('$_esri/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom: 18));
-      case MapBase.hybrid:
-        layers.add(_tile('$_esri/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxZoom: 18));
-        layers.add(_tile('$_esri/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', maxZoom: 18));
-        layers.add(_tile('$_esri/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', maxZoom: 18));
+    for (final sp in _baseSpecs(_base)) {
+      final t = _tile(sp);
+      layers.add(_base == MapBase.vintage
+          ? ColorFiltered(colorFilter: const ColorFilter.matrix(_vintageMatrix), child: t)
+          : t);
     }
     final url = _radarUrl;
     if (_radarOn && url != null) {
@@ -585,99 +706,9 @@ class _MapScreenState extends State<MapScreen> {
 
   String get _attribution => switch (_base) {
         MapBase.osm => '© OpenStreetMap contributors',
-        MapBase.satellite || MapBase.hybrid => 'Imagery © Esri, Maxar, Earthstar Geographics',
+        MapBase.satellite || MapBase.hybrid => 'Imagery © Esri (Clarity), Maxar, Earthstar Geographics',
         _ => 'Map © Esri, HERE, Garmin, © OpenStreetMap contributors',
       };
-
-  // ---------------------------------------------------------------- маркеры
-  Marker _dotMarker(PlaceDot d) {
-    final size = switch (d.kind) {
-      'city' => 18.0,
-      'town' => 14.0,
-      'village' => 11.0,
-      _ => 9.0,
-    };
-    final color = switch (d.kind) {
-      'city' => const Color(0xFFD32F2F),
-      'town' => const Color(0xFFF57C00),
-      'village' => const Color(0xFF388E3C),
-      _ => const Color(0xFF757575),
-    };
-    return Marker(
-      point: d.pos,
-      width: 28,
-      height: 28,
-      child: Tooltip(
-        message: d.population != null ? '${d.name} · ${d.population}' : d.name,
-        child: GestureDetector(
-          onTap: () => _showInfo(d.pos, hint: d.name),
-          child: Center(
-            child: Container(
-              width: size,
-              height: size,
-              decoration: BoxDecoration(
-                color: color,
-                borderRadius: BorderRadius.circular(size * 0.3),
-                border: Border.all(color: Colors.white, width: 2),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Квадратные значки с закруглёнными углами: меньше на дальних масштабах, крупнее вблизи.
-  Marker _stopMarker(Stop s, bool labels) {
-    final z = _zoomB;
-    final size = z >= 17 ? 26.0 : (z >= 16 ? 22.0 : (z >= 15 ? 19.0 : 17.0));
-    final sq = Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: s.kind.color,
-        borderRadius: BorderRadius.circular(size * 0.3),
-        border: Border.all(color: Config.pirate ? Pirate.gold : Colors.white, width: 1.6),
-      ),
-      child: Icon(s.kind.icon, size: size * 0.58, color: Colors.white),
-    );
-    if (!labels) {
-      return Marker(
-        point: s.pos,
-        width: size + 4,
-        height: size + 4,
-        child: GestureDetector(onTap: () => _openStop(s), child: sq),
-      );
-    }
-    return Marker(
-      point: s.pos,
-      width: 130,
-      height: 56,
-      child: GestureDetector(
-        onTap: () => _openStop(s),
-        child: Stack(clipBehavior: Clip.none, alignment: Alignment.center, children: [
-          sq,
-          Positioned(
-            left: 0,
-            right: 0,
-            top: 28 + size / 2 + 1,
-            child: Text(
-              s.name,
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFF263238),
-                shadows: [Shadow(color: Colors.white, blurRadius: 3), Shadow(color: Colors.white, blurRadius: 3)],
-              ),
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
 
   // ---------------------------------------------------------------- экран
   @override
@@ -685,7 +716,6 @@ class _MapScreenState extends State<MapScreen> {
     final cs = Theme.of(context).colorScheme;
     final pirate = Config.pirate;
     final vintage = _base == MapBase.vintage;
-    final labels = _zoomB >= 17 && _stops.length <= 150;
 
     final lines = <Polyline>[
       for (final l in _lineRoute)
@@ -733,21 +763,48 @@ class _MapScreenState extends State<MapScreen> {
         FlutterMap(
           mapController: _map,
           options: MapOptions(
-            initialCenter: const LatLng(59.9343, 30.3351),
-            initialZoom: 12,
+            initialCenter: LatLng(Config.lastLat ?? 59.9343, Config.lastLon ?? 30.3351),
+            initialZoom: Config.lastZoom.clamp(2.0, 19.0).toDouble(),
             minZoom: 2,
             maxZoom: 19,
+            backgroundColor: vintage ? const Color(0xFFE2D3A6) : const Color(0xFFDDDDDD),
             onMapReady: () {
               _mapReady = true;
+              Boot.set('Загружаю карту и остановки…');
               _fetch();
+              Future<void>.delayed(const Duration(milliseconds: 2600), _bootReady);
+              if (Config.autoLocate) unawaited(_locate(move: false, auto: true));
             },
-            onPositionChanged: (cam, _) => _onMove(cam),
+            onPositionChanged: (cam, gesture) {
+              // поворот карты отключён: значки на холсте рассчитаны на север сверху
+              if (_mapReady && cam.rotation.abs() > 0.01) _map.rotate(0);
+              _onMove(cam, gesture);
+            },
             onTap: (_, p) {
               if (_found.isNotEmpty) setState(() => _found = []);
               if (_picking != 0) {
                 final isFrom = _picking == 1;
                 setState(() => _picking = 0);
                 isFrom ? _setFrom(p, 'Точка на карте') : _setTo(p, 'Точка на карте');
+                return;
+              }
+              final z = _map.camera.zoom;
+              if (vintage && Config.seaLore) {
+                final lore = loreAt(p, z);
+                if (lore != null) {
+                  _showLore(lore);
+                  return;
+                }
+              }
+              final st = stopAt(p, z, _kinds);
+              if (st != null) {
+                _openStop(st);
+                return;
+              }
+              final dot = dotAt(p, z, _kinds);
+              if (dot != null) {
+                setState(() => _pin = dot.pos);
+                _showInfo(dot.pos, hint: dot.name);
                 return;
               }
               setState(() => _pin = p);
@@ -757,10 +814,21 @@ class _MapScreenState extends State<MapScreen> {
           ),
           children: [
             ..._tileLayers(),
+            if (vintage && Config.seaLore) SeaLoreLayer(label: pirateScript()),
             PolylineLayer(polylines: lines),
+            StopsLayer(kinds: _kinds, repaint: _repaint, ink: pirate || vintage),
+            if (_me != null && _meAcc > 0)
+              CircleLayer(circles: [
+                CircleMarker(
+                  point: _me!,
+                  radius: _meAcc.clamp(10.0, 20000.0).toDouble(),
+                  useRadiusInMeter: true,
+                  color: _meApprox ? const Color(0x182979FF) : const Color(0x222979FF),
+                  borderColor: const Color(0x662979FF),
+                  borderStrokeWidth: 1.5,
+                )
+              ]),
             MarkerLayer(markers: [
-              for (final d in _dots) _dotMarker(d),
-              for (final s in _stops) _stopMarker(s, labels),
               if (_pin != null)
                 Marker(
                     point: _pin!,
@@ -769,7 +837,19 @@ class _MapScreenState extends State<MapScreen> {
                     alignment: Alignment.topCenter,
                     child: Icon(Icons.location_on, color: pirate ? Pirate.wax : const Color(0xFFE53935), size: 40)),
               if (_me != null)
-                Marker(point: _me!, child: const Icon(Icons.my_location, color: Colors.blue, size: 28)),
+                Marker(
+                  point: _me!,
+                  width: 26,
+                  height: 26,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2979FF),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 3),
+                      boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 6)],
+                    ),
+                  ),
+                ),
               if (_from != null)
                 Marker(point: _from!, child: const Icon(Icons.trip_origin, color: Colors.green, size: 30)),
               if (_to != null)
@@ -786,7 +866,7 @@ class _MapScreenState extends State<MapScreen> {
           ],
         ),
 
-        if (pirate || vintage) VintageOverlay(vignette: vintage, compass: vintage && !_routeOpen),
+        if (pirate || vintage) VintageOverlay(vignette: vintage, compass: vintage && !_routeOpen, paper: vintage),
 
         // кнопки справа
         Positioned(

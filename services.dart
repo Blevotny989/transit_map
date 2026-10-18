@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' show sqrt;
 import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:latlong2/latlong.dart';
 import 'config.dart';
 import 'models.dart';
@@ -23,41 +25,67 @@ const _mirrors = [
   'https://overpass.private.coffee/api/interpreter',
 ];
 
+/// Отдельный клиент для Overpass: постоянные соединения, до 12 запросов одновременно.
+final http.Client _opClient = IOClient(HttpClient()
+  ..maxConnectionsPerHost = 12
+  ..idleTimeout = const Duration(seconds: 60)
+  ..connectionTimeout = const Duration(seconds: 8));
+
+final List<DateTime> _coolUntil = List<DateTime>.filled(_mirrors.length, DateTime.fromMillisecondsSinceEpoch(0));
+int _rr = 0;
+
 Future<dynamic> _overpassOne(String url, String query) async {
-  final r = await httpClient
+  final r = await _opClient
       .post(Uri.parse(url), headers: _hdr, body: {'data': query})
       .timeout(const Duration(seconds: 25));
   if (r.statusCode != 200) throw Exception('Overpass HTTP ${r.statusCode}');
   return jsonDecode(utf8.decode(r.bodyBytes));
 }
 
-Future<T> _firstSuccess<T>(List<Future<T>> fs) {
-  final c = Completer<T>();
-  var failed = 0;
-  for (final f in fs) {
-    f.then((v) {
-      if (!c.isCompleted) c.complete(v);
-    }).catchError((Object e) {
-      failed++;
-      if (failed == fs.length && !c.isCompleted) c.completeError(e);
-    });
+/// Запрос к Overpass. Серверы чередуются, чтобы параллельные запросы не упирались в лимит
+/// одного из них. Если ответа нет 1,5 с, к гонке подключается следующий сервер; упавший
+/// сервер на 45 секунд откладывается. Побеждает первый успешный ответ.
+Future<dynamic> _overpass(String query) {
+  final now = DateTime.now();
+  final order = <int>[];
+  for (var k = 0; k < _mirrors.length; k++) {
+    final i = (_rr + k) % _mirrors.length;
+    if (now.isAfter(_coolUntil[i])) order.add(i);
   }
-  return c.future;
-}
+  for (var k = 0; k < _mirrors.length; k++) {
+    final i = (_rr + k) % _mirrors.length;
+    if (!order.contains(i)) order.add(i);
+  }
+  _rr = (_rr + 1) % _mirrors.length;
 
-/// Запрос к Overpass: два сервера одновременно, побеждает самый быстрый.
-Future<dynamic> _overpass(String query) async {
-  try {
-    return await _firstSuccess([
-      _overpassOne(_mirrors[0], query),
-      _overpassOne(_mirrors[1], query),
-    ]);
-  } catch (_) {}
-  try {
-    return await _overpassOne(_mirrors[2], query);
-  } catch (e) {
-    throw Exception('Сервер данных недоступен');
+  final c = Completer<dynamic>();
+  var next = 0, failed = 0;
+  Timer? hedge;
+  void launchNext() {
+    if (next >= order.length || c.isCompleted) return;
+    final i = order[next++];
+    _overpassOne(_mirrors[i], query).then((v) {
+      hedge?.cancel();
+      if (!c.isCompleted) c.complete(v);
+    }, onError: (Object e) {
+      _coolUntil[i] = DateTime.now().add(const Duration(seconds: 45));
+      failed++;
+      if (c.isCompleted) return;
+      if (failed >= order.length) {
+        hedge?.cancel();
+        c.completeError(Exception('Сервер данных недоступен'));
+      } else {
+        launchNext();
+      }
+    });
+    if (next < order.length) {
+      hedge?.cancel();
+      hedge = Timer(const Duration(milliseconds: 1500), launchNext);
+    }
   }
+
+  launchNext();
+  return c.future;
 }
 
 // ------------------------------------------------ плиточные хранилища данных
@@ -117,9 +145,12 @@ PlaceDot _decPlace(Map<String, dynamic> m) {
 final stopStore = TileStore<Stop>(
   name: 'stops',
   z: 14,
-  clause: (bb) => 'nwr["highway"="bus_stop"]($bb);'
-      'nwr["railway"~"^(station|halt|tram_stop)\$"]($bb);'
-      'nwr["amenity"~"^(ferry_terminal|bus_station)\$"]($bb);',
+  clause: (bb) => 'node["highway"="bus_stop"]($bb);'
+      'node["railway"="tram_stop"]($bb);'
+      'nwr["railway"="station"]($bb);'
+      'nwr["railway"="halt"]($bb);'
+      'nwr["amenity"="ferry_terminal"]($bb);'
+      'nwr["amenity"="bus_station"]($bb);',
   parse: _parseStop,
   posOf: (s) => s.pos,
   enc: _encStop,

@@ -1,4 +1,10 @@
 # Транспортная карта (Flutter / Dart)
-Windows, Linux, macOS, Android. Данные: OpenStreetMap, Esri, HERE, 2ГИС, Яндекс.Расписания, Transitland, RainViewer, Open-Meteo, Wikipedia.
-Ключи, язык и оформление: значок шестерёнки в программе.
+Windows, Linux, macOS, Android. Данные: OpenStreetMap, Esri (в том числе снимки Clarity), HERE, 2ГИС, Яндекс.Расписания, Transitland, RainViewer, Open-Meteo, Wikipedia.
+Ключи, язык, оформление, положение и кэш: значок шестерёнки в программе.
 Сборка Windows: .github/workflows/build.yml (GitHub Actions).
+
+Что внутри:
+- Кэш карты: память -> диск (45 дней, спутник 14 дней) -> сеть. Размер виден в настройках.
+- Остановки и города рисуются на холсте и подгружаются заранее вокруг экрана.
+- Положение: запрос разрешения у Windows, при отказе примерное положение по IP.
+- Старинная карта с морскими легендами (нажмите на чудовище).
