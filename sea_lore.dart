@@ -5,7 +5,7 @@ import 'package:latlong2/latlong.dart';
 import 'app_theme.dart';
 import 'geo_px.dart';
 
-enum LoreKind { bermuda, serpent, kraken, galleon, ghostShip, whirlpool, atlantis, treasure, label }
+enum LoreKind { bermuda, serpent, kraken, galleon, ghostShip, whirlpool, atlantis, treasure, whale, longship, rose, label }
 
 /// Морская «пасхалка» на старинной карте: рисунок, подпись и легенда по нажатию.
 class LoreItem {
@@ -116,6 +116,36 @@ const loreItems = <LoreItem>[
         'Настоящие пираты, кстати, почти не зарывали сокровища: чаще они тратили добычу сразу.',
   ),
   LoreItem(
+    'whale',
+    LoreKind.whale,
+    LatLng(40.0, -155.0),
+    10,
+    'Кит',
+    'Кит-фонтан',
+    'На старинных картах китов рисовали огромными и грозными: моряки принимали их за морских чудовищ, '
+        'а китовый фонтан за дыхание дракона. Синий кит, самое большое животное на Земле, достигает 30 метров.',
+  ),
+  LoreItem(
+    'longship',
+    LoreKind.longship,
+    LatLng(57.0, -40.0),
+    9,
+    'Драккар викингов',
+    'Драккар викингов',
+    'Викинги на таких кораблях дошли до Исландии, Гренландии и Северной Америки: поселение в Л\'Анс-о-Медоу '
+        'на Ньюфаундленде относят примерно к 1000 году, то есть за 500 лет до Колумба.',
+  ),
+  LoreItem(
+    'rose',
+    LoreKind.rose,
+    LatLng(2.0, -27.0),
+    15,
+    'Роза ветров',
+    'Роза ветров',
+    'На средневековых морских картах (портоланах) от таких «роз» расходились линии румбов: по ним штурман '
+        'прокладывал курс по компасу. Такие карты рисовали в Генуе, Венеции и на Майорке.',
+  ),
+  LoreItem(
     'incognita',
     LoreKind.label,
     LatLng(-58.0, -105.0),
@@ -140,9 +170,9 @@ const loreItems = <LoreItem>[
 
 /// Окно масштабов, в котором видны рисунки, и плавное появление и исчезновение.
 double loreAlpha(double zoom) {
-  if (zoom < 1.8 || zoom > 7.8) return 0;
+  if (zoom < 1.8 || zoom > 8.6) return 0;
   if (zoom < 2.5) return (zoom - 1.8) / 0.7;
-  if (zoom > 6.6) return (7.8 - zoom) / 1.2;
+  if (zoom > 7.4) return (8.6 - zoom) / 1.2;
   return 1;
 }
 
@@ -565,6 +595,134 @@ void _treasure(Canvas c) {
   _dashed(c, trail, _line(1.0, _ink), 3.2, 2.6);
 }
 
+
+void _whale(Canvas c) {
+  c.translate(-50, 8);
+  _waves(c, -2, 102, 4, Pirate.sea.withAlpha(200), amp: 1.6, len: 9);
+  const skin = Color(0xFFC9BC9C);
+  final body = Path()
+    ..moveTo(8, 3)
+    ..cubicTo(6, -14, 30, -27, 56, -21)
+    ..cubicTo(72, -18, 80, -10, 88, -17)
+    ..lineTo(88, 3)
+    ..close();
+  final flukes = Path()
+    ..moveTo(88, -16)
+    ..quadraticBezierTo(80, -35, 69, -33)
+    ..quadraticBezierTo(79, -25, 88, -16)
+    ..quadraticBezierTo(97, -34, 106, -29)
+    ..quadraticBezierTo(97, -24, 88, -16)
+    ..close();
+  c.drawPath(flukes, Paint()..color = skin);
+  c.drawPath(flukes, _line(1.3, _ink));
+  c.drawPath(body, Paint()..color = skin);
+  c.drawPath(body, _line(1.5, _ink));
+  final groove = _line(0.7, _ink.withAlpha(150));
+  for (var k = 0; k < 6; k++) {
+    c.drawLine(Offset(16 + k * 1.2, -8 + k * 1.8), Offset(44 + k * 2, -9 + k * 2), groove);
+  }
+  c.drawCircle(const Offset(19, -11), 1.7, Paint()..color = _ink);
+  c.drawPath(
+      Path()
+        ..moveTo(9, -3)
+        ..quadraticBezierTo(20, -1, 34, -5),
+      _line(1.0, _ink));
+  final spout = _line(1.3, Pirate.sea);
+  c.drawPath(
+      Path()
+        ..moveTo(30, -23)
+        ..cubicTo(30, -35, 23, -41, 16, -38),
+      spout);
+  c.drawPath(
+      Path()
+        ..moveTo(30, -23)
+        ..cubicTo(30, -35, 37, -41, 44, -38),
+      spout);
+  c.drawPath(
+      Path()
+        ..moveTo(30, -23)
+        ..lineTo(30, -40),
+      spout);
+  for (final d in const [Offset(14, -34), Offset(46, -34), Offset(20, -42), Offset(40, -43)]) {
+    c.drawCircle(d, 1.1, Paint()..color = Pirate.sea);
+  }
+}
+
+void _longship(Canvas c) {
+  c.translate(-50, -30);
+  const wood = Color(0xFF8A6038);
+  final hull = Path()
+    ..moveTo(8, 26)
+    ..cubicTo(14, 44, 30, 52, 50, 52)
+    ..cubicTo(70, 52, 86, 44, 92, 26)
+    ..quadraticBezierTo(50, 36, 8, 26)
+    ..close();
+  final prow = Path()
+    ..moveTo(8, 26)
+    ..cubicTo(1, 19, 1, 9, 8, 5)
+    ..quadraticBezierTo(14, 3, 13, 8);
+  final stern = Path()
+    ..moveTo(92, 26)
+    ..cubicTo(99, 19, 99, 11, 93, 8);
+  _tube(c, prow, 2.8, wood, _ink);
+  _tube(c, stern, 2.8, wood, _ink);
+  c.drawCircle(const Offset(11, 6.2), 0.9, Paint()..color = Colors.white);
+  // мачта, рей, полосатый парус
+  c.drawLine(const Offset(50, 32), const Offset(50, -2), _line(1.8, _ink));
+  for (var k = 0; k < 6; k++) {
+    final r = Rect.fromLTWH(30 + k * 6.7, 2, 6.7, 26);
+    c.drawRect(r, Paint()..color = k.isEven ? Pirate.wax : const Color(0xFFF3E7C6));
+  }
+  c.drawRect(const Rect.fromLTWH(30, 2, 40.2, 26), _line(1.1, _ink));
+  c.drawLine(const Offset(28, 2), const Offset(72, 2), _line(1.8, _ink));
+  c.drawLine(const Offset(50, -2), const Offset(10, 8), _line(0.6, _ink));
+  c.drawLine(const Offset(50, -2), const Offset(92, 9), _line(0.6, _ink));
+  c.drawPath(hull, Paint()..color = wood);
+  c.drawPath(hull, _line(1.4, _ink));
+  for (var k = 0; k < 8; k++) {
+    final x = 19.0 + k * 8.8;
+    c.drawCircle(Offset(x, 33.5 + (x - 50).abs() * 0.03), 3.2, Paint()..color = k.isEven ? const Color(0xFFD9B45A) : Pirate.wax);
+    c.drawCircle(Offset(x, 33.5 + (x - 50).abs() * 0.03), 3.2, _line(0.8, _ink));
+  }
+  _waves(c, 0, 100, 52, Pirate.sea.withAlpha(200), amp: 1.8, len: 9);
+  _waves(c, 8, 92, 59, Pirate.sea.withAlpha(140), amp: 1.4, len: 8);
+}
+
+void _rose(Canvas c, TextStyle label) {
+  final ring = _line(1.2, _ink.withAlpha(200));
+  c.drawCircle(Offset.zero, 42, ring);
+  c.drawCircle(Offset.zero, 35, _line(0.9, const Color(0xFFB8893A)));
+  c.drawCircle(Offset.zero, 4, Paint()..color = Pirate.wax);
+  for (var i = 0; i < 16; i++) {
+    final a = -math.pi / 2 + i * math.pi / 8;
+    final len = i % 4 == 0 ? 48.0 : (i.isEven ? 38.0 : 27.0);
+    final w = i % 4 == 0 ? 7.0 : (i.isEven ? 5.0 : 3.4);
+    Offset at(double ang, double d) => Offset(math.cos(ang), math.sin(ang)) * d;
+    final tip = at(a, len);
+    final left = at(a + math.pi / 2, w);
+    final right = at(a - math.pi / 2, w);
+    final p1 = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(left.dx, left.dy)
+      ..lineTo(0, 0)
+      ..close();
+    final p2 = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(right.dx, right.dy)
+      ..lineTo(0, 0)
+      ..close();
+    c.drawPath(p1, Paint()..color = i == 0 ? Pirate.wax : _ink);
+    c.drawPath(p2, Paint()..color = const Color(0xFFE9D9AE));
+    c.drawPath(p1, _line(0.6, _ink));
+    c.drawPath(p2, _line(0.6, _ink));
+  }
+  final tp = TextPainter(
+    text: TextSpan(text: 'N', style: label.copyWith(fontSize: 11, color: Pirate.wax)),
+    textDirection: TextDirection.ltr,
+  )..layout();
+  tp.paint(c, Offset(-tp.width / 2, -62));
+}
+
 TextPainter _text(String s, TextStyle base, double size, Color color, {bool halo = false, double maxWidth = 600}) {
   final style = halo
       ? base.copyWith(
@@ -668,6 +826,12 @@ class SeaLorePainter extends CustomPainter {
             _atlantis(canvas);
           case LoreKind.treasure:
             _treasure(canvas);
+          case LoreKind.whale:
+            _whale(canvas);
+          case LoreKind.longship:
+            _longship(canvas);
+          case LoreKind.rose:
+            _rose(canvas, label);
           case LoreKind.bermuda || LoreKind.label:
             break;
         }

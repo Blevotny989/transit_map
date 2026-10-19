@@ -47,6 +47,7 @@ class _MapScreenState extends State<MapScreen> {
   bool _loading = false;
   String? _hint;
   bool _userMoved = false, _hadSavedView = false, _bootDone = false, _locating = false;
+  MapBase? _prevBase;
   double _meAcc = 0;
   bool _meApprox = false;
 
@@ -86,6 +87,7 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     _base = MapBase.values.firstWhere((b) => b.name == Config.baseName, orElse: () => MapBase.scheme);
+    _prevBase = MapBase.values.firstWhere((b) => b.name == Config.prevBaseName, orElse: () => MapBase.scheme);
     _hadSavedView = Config.lastLat != null && Config.lastLon != null;
     _tileProvider = NetworkTileProvider(httpClient: tileClient);
     stopStore.onChange = _refreshVisible;
@@ -205,7 +207,7 @@ class _MapScreenState extends State<MapScreen> {
     for (final dz in const [1, -1]) {
       final tz = zi + dz;
       for (final sp in _baseSpecs(_base)) {
-        if (tz < 1 || tz > sp.maxZoom) continue;
+        if (tz < 1 || tz > sp.maxZoom || sp.url.contains('openstreetmap.org')) continue;
         unawaited(prefetchTiles(sp.url, cam.center, tz, radiusX: dz > 0 ? 2 : 1, radiusY: dz > 0 ? 1 : 0));
       }
     }
@@ -246,6 +248,37 @@ class _MapScreenState extends State<MapScreen> {
       _pin = p.pos;
     });
     _showInfo(p.pos, hint: p.name);
+  }
+
+  /// При первом запуске программа сама спрашивает, можно ли узнать положение, и только потом
+  /// обращается к Windows. В следующие запуски положение определяется тихо.
+  Future<void> _startLocation() async {
+    if (!Config.autoLocate) return;
+    if (!Config.locAsked) {
+      await Future<void>.delayed(const Duration(milliseconds: 1800));
+      if (!mounted) return;
+      final ok = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Показать вас на карте?'),
+          content: const Text('Программа может узнать ваше положение, чтобы показать вас на карте и строить маршруты '
+              '«от меня». Сейчас она попросит разрешение у Windows. Если Windows не даст доступ, можно показать '
+              'примерное место по IP-адресу (запрос к сервису geojs.io).'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Не сейчас')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Разрешить')),
+          ],
+        ),
+      );
+      Config.locAsked = true;
+      if (ok != true) Config.autoLocate = false;
+      await Config.save();
+      if (ok != true || !mounted) return;
+      await _locate(move: !_userMoved);
+      return;
+    }
+    await _locate(move: false, auto: true);
   }
 
   void _applyFix(LocFix f, {required bool move}) {
@@ -329,6 +362,37 @@ class _MapScreenState extends State<MapScreen> {
         _snack(place != null && place.isNotEmpty ? 'Примерное положение: $place' : 'Показано примерное положение');
       }
     }
+  }
+
+  /// Одна кнопка переключает весь вид: старинная карта, коричневое оформление, рукописные
+  /// шрифты и морские легенды, и обратно. Прежняя подложка запоминается.
+  void _toggleOldStyle() {
+    final turnOn = !Config.pirate;
+    setState(() {
+      if (turnOn) {
+        if (_base != MapBase.vintage) _prevBase = _base;
+        _base = MapBase.vintage;
+      } else if (_base == MapBase.vintage) {
+        _base = _prevBase ?? MapBase.scheme;
+      }
+    });
+    Config.theme.value = turnOn ? 'pirate' : 'modern';
+    Config.baseName = _base.name;
+    Config.prevBaseName = (_prevBase ?? MapBase.scheme).name;
+    Config.save();
+    _fetch();
+    if (turnOn && Config.seaLore) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        duration: const Duration(seconds: 8),
+        content: const Text('Старинная карта включена. В океанах живут чудовища: нажмите на любое из них.'),
+        action: SnackBarAction(label: 'К Левиафану', onPressed: _flyToLeviathan),
+      ));
+    }
+  }
+
+  void _flyToLeviathan() {
+    _userMoved = true;
+    _map.move(const LatLng(26.5, -70.0), 4.6);
   }
 
   void _showLore(LoreItem it) {
@@ -615,6 +679,11 @@ class _MapScreenState extends State<MapScreen> {
                   label: Text(b.label),
                   selected: _base == b,
                   onSelected: (_) {
+                    if (b == MapBase.vintage && !Config.pirate) {
+                      Navigator.pop(ctx);
+                      _toggleOldStyle();
+                      return;
+                    }
                     setState(() => _base = b);
                     Config.baseName = b.name;
                     Config.saveView();
@@ -642,31 +711,40 @@ class _MapScreenState extends State<MapScreen> {
 
   // ------------------------------------------------------------------ тайлы
   static const _clarity = 'https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  static const _sentinel = 'https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2025_3857/default/g/{z}/{y}/{x}.jpg';
 
   /// Какие плитки нужны для выбранной подложки (используется и для подгрузки заранее).
   List<_Layer> _baseSpecs(MapBase b) => switch (b) {
         MapBase.scheme => [_Layer('$_esri/World_Street_Map/MapServer/tile/{z}/{y}/{x}')],
-        MapBase.topo || MapBase.vintage => [_Layer('$_esri/World_Topo_Map/MapServer/tile/{z}/{y}/{x}')],
+        MapBase.topo => [_Layer('$_esri/World_Topo_Map/MapServer/tile/{z}/{y}/{x}')],
+        // Старинная карта строится на плитках OpenStreetMap: у них известная палитра,
+        // поэтому контраст суши, моря, дорог и подписей настроен точно.
+        MapBase.vintage => [_Layer('https://tile.openstreetmap.org/{z}/{x}/{y}.png')],
         MapBase.dark => [
             _Layer('$_esri/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', 16),
             _Layer('$_esri/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', 16),
           ],
         MapBase.osm => [_Layer('https://tile.openstreetmap.org/{z}/{x}/{y}.png')],
-        // Clarity: самые свежие и чёткие снимки Esri; где их нет, берётся обычный World Imagery
-        MapBase.satellite => [_Layer(_clarity, 19)],
+        // Спутник: основной World Imagery, Esri обновляет его чаще всего
+        MapBase.satellite => [_Layer('$_esri/World_Imagery/MapServer/tile/{z}/{y}/{x}', 19)],
+        // Clarity: снимки чётче и без облаков, но не обязательно самые новые
+        MapBase.clarity => [_Layer(_clarity, 19)],
+        // Sentinel-2 cloudless 2025: свежая мозаика всей Земли (10 м на пиксель, вышла в июне 2026)
+        MapBase.sentinel => [_Layer(_sentinel, 13)],
         MapBase.hybrid => [
-            _Layer(_clarity, 19),
+            _Layer('$_esri/World_Imagery/MapServer/tile/{z}/{y}/{x}', 19),
             _Layer('$_esri/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', 18),
             _Layer('$_esri/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', 18),
           ],
       };
 
-  /// Старинная карта: тёплая бумага, суша светлее моря, подписи тёмно-коричневыми чернилами.
-  /// Названия остаются современными, меняются только краски.
+  /// Старинная карта: тёплая бумага, суша светлее моря, дороги светлые с тёмным контуром,
+  /// подписи тёмно-коричневыми чернилами. Названия остаются современными, меняются только краски.
+  /// Коэффициенты подобраны по палитре OpenStreetMap (суша, вода, леса, парки, дороги, текст).
   static const List<double> _vintageMatrix = <double>[
-    1.135, -0.291, -0.059, 0, 49.5,
-    0.397, 0.365, 0.053, 0, 30.5,
-    0.288, -0.037, 0.515, 0, 13.3,
+    1.445, 0.162, -0.822, 0, 30.9,
+    0.582, 0.722, -0.499, 0, 13.6,
+    0.116, 0.349, 0.266, 0, -1.1,
     0, 0, 0, 1, 0,
   ];
 
@@ -705,8 +783,10 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   String get _attribution => switch (_base) {
-        MapBase.osm => '© OpenStreetMap contributors',
-        MapBase.satellite || MapBase.hybrid => 'Imagery © Esri (Clarity), Maxar, Earthstar Geographics',
+        MapBase.osm || MapBase.vintage => '© OpenStreetMap contributors',
+        MapBase.satellite || MapBase.hybrid => 'Imagery © Esri, Maxar, Earthstar Geographics, USDA FSA, USGS, Aerogrid, IGN',
+        MapBase.clarity => 'Imagery © Esri (World Imagery Clarity), Maxar, Earthstar Geographics',
+        MapBase.sentinel => 'EOxCloudless 2025, EOX IT Services GmbH (contains modified Copernicus Sentinel data 2025)',
         _ => 'Map © Esri, HERE, Garmin, © OpenStreetMap contributors',
       };
 
@@ -767,13 +847,13 @@ class _MapScreenState extends State<MapScreen> {
             initialZoom: Config.lastZoom.clamp(2.0, 19.0).toDouble(),
             minZoom: 2,
             maxZoom: 19,
-            backgroundColor: vintage ? const Color(0xFFE2D3A6) : const Color(0xFFDDDDDD),
+            backgroundColor: vintage ? const Color(0xFFD2C29A) : const Color(0xFFDDDDDD),
             onMapReady: () {
               _mapReady = true;
               Boot.set('Загружаю карту и остановки…');
               _fetch();
               Future<void>.delayed(const Duration(milliseconds: 2600), _bootReady);
-              if (Config.autoLocate) unawaited(_locate(move: false, auto: true));
+              unawaited(_startLocation());
             },
             onPositionChanged: (cam, gesture) {
               // поворот карты отключён: значки на холсте рассчитаны на север сверху
@@ -873,6 +953,9 @@ class _MapScreenState extends State<MapScreen> {
           right: 22,
           top: 22,
           child: Column(children: [
+            fab('style', pirate ? 'Вернуть современную карту' : 'Старинная карта', pirate ? Icons.public : Icons.history_edu,
+                const Color(0xFF8D6E63), _toggleOldStyle),
+            const SizedBox(height: 8),
             fab('layers', 'Вид карты и радар', pirate ? Icons.map : Icons.layers, const Color(0xFF7E57C2), _openLayers),
             const SizedBox(height: 8),
             fab('route', pirate ? 'Проложить курс' : 'Построить маршрут', pirate ? Icons.sailing : Icons.directions,

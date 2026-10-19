@@ -97,7 +97,7 @@ class ObjectInfo {
       {this.wikiText, this.wikiImage, this.wikiUrl});
 }
 
-enum MapBase { scheme, topo, vintage, dark, osm, satellite, hybrid }
+enum MapBase { scheme, topo, vintage, dark, osm, satellite, clarity, sentinel, hybrid }
 
 extension MapBaseX on MapBase {
   String get label => switch (this) {
@@ -107,6 +107,8 @@ extension MapBaseX on MapBase {
         MapBase.dark => 'Тёмная',
         MapBase.osm => 'OSM',
         MapBase.satellite => 'Спутник',
+        MapBase.clarity => 'Спутник (чёткий)',
+        MapBase.sentinel => 'Sentinel-2 · 2025',
         MapBase.hybrid => 'Гибрид',
       };
   IconData get icon => switch (this) {
@@ -116,6 +118,8 @@ extension MapBaseX on MapBase {
         MapBase.dark => Icons.dark_mode_outlined,
         MapBase.osm => Icons.public,
         MapBase.satellite => Icons.satellite_alt,
+        MapBase.clarity => Icons.high_quality,
+        MapBase.sentinel => Icons.satellite,
         MapBase.hybrid => Icons.layers,
       };
 }

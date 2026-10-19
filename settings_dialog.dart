@@ -21,7 +21,6 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   final _tl = TextEditingController(text: Config.transitlandKey);
   final _otp = TextEditingController(text: Config.otpUrl);
   String _lang = Config.lang;
-  String _theme = Config.theme.value;
   bool _autoLocate = Config.autoLocate;
   bool _lore = Config.seaLore;
   bool _cleared = false;
@@ -66,15 +65,6 @@ class _SettingsDialogState extends State<_SettingsDialog> {
             Text('Названия мест и остановок показываются на этом языке, а искать можно на любом. '
                 'Интерфейс программы остаётся русским.',
                 style: small),
-            _title('Оформление'),
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'modern', label: Text('Современное'), icon: Icon(Icons.map_outlined)),
-                ButtonSegment(value: 'pirate', label: Text('Старинная карта'), icon: Icon(Icons.sailing)),
-              ],
-              selected: {_theme},
-              onSelectionChanged: (s) => setState(() => _theme = s.first),
-            ),
             _title('Положение и карта'),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -151,7 +141,6 @@ class _SettingsDialogState extends State<_SettingsDialog> {
               u = u.substring(0, u.length - 1);
             }
             Config.otpUrl = u;
-            Config.theme.value = _theme;
             Config.autoLocate = _autoLocate;
             Config.seaLore = _lore;
             await Config.save();

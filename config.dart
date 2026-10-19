@@ -40,6 +40,10 @@ class Config {
   static double? lastLat, lastLon;
   static double lastZoom = 12;
   static String baseName = 'scheme';
+  static String prevBaseName = 'scheme';
+
+  /// Вопрос про положение уже задавали (при первом запуске).
+  static bool locAsked = false;
 
   static const languages = <AppLang>[
     AppLang('ru', 'Русский'),
@@ -81,6 +85,8 @@ class Config {
       lastLon = p.getDouble('last_lon');
       lastZoom = p.getDouble('last_zoom') ?? 12;
       baseName = p.getString('base') ?? 'scheme';
+      prevBaseName = p.getString('prev_base') ?? 'scheme';
+      locAsked = p.getBool('loc_asked') ?? false;
     } catch (_) {}
   }
 
@@ -94,6 +100,8 @@ class Config {
       }
       await p.setDouble('last_zoom', lastZoom);
       await p.setString('base', baseName);
+      await p.setString('prev_base', prevBaseName);
+      await p.setBool('loc_asked', locAsked);
     } catch (_) {}
   }
 
@@ -109,6 +117,9 @@ class Config {
       await p.setString('otp_url', otpUrl);
       await p.setBool('auto_locate', autoLocate);
       await p.setBool('sea_lore', seaLore);
+      await p.setBool('loc_asked', locAsked);
+      await p.setString('prev_base', prevBaseName);
+      await p.setString('base', baseName);
     } catch (_) {}
   }
 }

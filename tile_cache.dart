@@ -32,7 +32,7 @@ class TileCacheClient extends http.BaseClient {
   final Directory _dir;
   final Duration ttl;
 
-  static const _hosts = ['arcgisonline.com', 'arcgis.com', 'openstreetmap.org'];
+  static const _hosts = ['arcgisonline.com', 'arcgis.com', 'openstreetmap.org', 'eox.at'];
   static const _memLimit = 100 * 1024 * 1024;
 
   final LinkedHashMap<String, Uint8List> _mem = LinkedHashMap<String, Uint8List>();
@@ -54,11 +54,17 @@ class TileCacheClient extends http.BaseClient {
 
   String _key(Uri u) {
     final p = u.path.replaceFirst('/ArcGIS/rest/services/', '').replaceAll(RegExp(r'[^A-Za-z0-9]'), '_');
-    return '${u.host.split('.').first}_$p';
+    final k = '${u.host.split('.').first}_$p';
+    // v3: снимки со спутника от прежних версий программы в кэше не используются, берутся заново
+    return k.contains('World_Imagery') || k.contains('s2cloudless') ? 'v3_$k' : k;
   }
 
-  /// Снимки со спутника обновляются чаще, чем схема.
-  Duration _ttlFor(String key) => key.contains('World_Imagery') ? const Duration(days: 14) : ttl;
+  /// Снимки со спутника обновляются чаще, чем схема (Sentinel-2 выходит раз в год).
+  Duration _ttlFor(String key) {
+    if (key.contains('s2cloudless')) return const Duration(days: 90);
+    if (key.contains('World_Imagery')) return const Duration(days: 14);
+    return ttl;
+  }
 
   File _file(String key) {
     final shard = (_fnv(key) & 0xFF).toRadixString(16).padLeft(2, '0');
