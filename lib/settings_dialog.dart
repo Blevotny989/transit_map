@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'config.dart';
-import 'disk_cache.dart';
 import 'services.dart';
 import 'tile_cache.dart';
 
@@ -22,8 +21,10 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   final _tl = TextEditingController(text: Config.transitlandKey);
   final _otp = TextEditingController(text: Config.otpUrl);
   String _lang = Config.lang;
-  String _theme = Config.theme.value;
+  bool _autoLocate = Config.autoLocate;
+  bool _lore = Config.seaLore;
   bool _cleared = false;
+  late Future<CacheStats> _stats = cacheStats();
 
   Widget _title(String t) => Padding(
         padding: const EdgeInsets.only(top: 18, bottom: 6),
@@ -64,14 +65,21 @@ class _SettingsDialogState extends State<_SettingsDialog> {
             Text('Названия мест и остановок показываются на этом языке, а искать можно на любом. '
                 'Интерфейс программы остаётся русским.',
                 style: small),
-            _title('Оформление'),
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'modern', label: Text('Современное'), icon: Icon(Icons.map_outlined)),
-                ButtonSegment(value: 'pirate', label: Text('Старинная карта'), icon: Icon(Icons.sailing)),
-              ],
-              selected: {_theme},
-              onSelectionChanged: (s) => setState(() => _theme = s.first),
+            _title('Положение и карта'),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Определять моё положение при запуске'),
+              subtitle: Text('Windows один раз спросит разрешение. Если его нет, карта покажет примерное место по IP.',
+                  style: small),
+              value: _autoLocate,
+              onChanged: (v) => setState(() => _autoLocate = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Морские чудовища на старинной карте'),
+              subtitle: Text('Левиафан, кракен, Бермудский треугольник и другие. Их можно нажать.', style: small),
+              value: _lore,
+              onChanged: (v) => setState(() => _lore = v),
             ),
             _title('Ключи API для расписаний и маршрутов'),
             Text('Можно вписать несколько ключей через запятую или с новой строки: если у одного кончится лимит, '
@@ -84,16 +92,31 @@ class _SettingsDialogState extends State<_SettingsDialog> {
             _field(_yandex, 'Яндекс.Расписания (СНГ): отправления', 'developer.tech.yandex.ru'),
             _field(_otp, 'OpenTripPlanner (необязательно)', 'https://otp.example.com'),
             _title('Кэш'),
+            FutureBuilder<CacheStats>(
+              future: _stats,
+              builder: (_, snap) => Text(
+                  snap.hasData
+                      ? 'Сейчас на диске: ${snap.data!.human}, файлов: ${snap.data!.files}. '
+                          'Плитки карты хранятся 45 дней (снимки со спутника 14 дней), остановки 14 дней. '
+                          'Просмотренные места открываются мгновенно и без интернета.'
+                      : 'Считаю размер кэша…',
+                  style: small),
+            ),
+            const SizedBox(height: 8),
             Row(children: [
               OutlinedButton.icon(
                 onPressed: () async {
-                  await DiskCache.clear();
+                  await clearAllCaches();
                   stopStore.clearMemory();
                   stationStore.clearMemory();
                   bigPlaceStore.clearMemory();
                   smallPlaceStore.clearMemory();
-                  await initTileCache();
-                  if (mounted) setState(() => _cleared = true);
+                  if (mounted) {
+                    setState(() {
+                      _cleared = true;
+                      _stats = cacheStats();
+                    });
+                  }
                 },
                 icon: const Icon(Icons.delete_outline),
                 label: const Text('Очистить кэш карты'),
@@ -118,7 +141,8 @@ class _SettingsDialogState extends State<_SettingsDialog> {
               u = u.substring(0, u.length - 1);
             }
             Config.otpUrl = u;
-            Config.theme.value = _theme;
+            Config.autoLocate = _autoLocate;
+            Config.seaLore = _lore;
             await Config.save();
             if (context.mounted) Navigator.pop(context);
           },

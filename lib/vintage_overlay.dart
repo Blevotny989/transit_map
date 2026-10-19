@@ -1,26 +1,101 @@
 import 'dart:math';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'app_theme.dart';
 
-/// Рамка, затемнённые края и роза ветров поверх карты в старинном стиле.
+Future<ui.Image>? _grain;
+
+/// Бумажная фактура: мелкие пятнышки и волокна. Создаётся один раз.
+Future<ui.Image> _makeGrain() async {
+  final rec = ui.PictureRecorder();
+  final c = Canvas(rec);
+  c.drawRect(const Rect.fromLTWH(0, 0, 256, 256), Paint()..color = Colors.white);
+  final rnd = Random(7);
+  final p = Paint();
+  for (var i = 0; i < 2800; i++) {
+    p.color = Color.fromARGB(rnd.nextInt(30) + 8, 96, 64, 24);
+    c.drawCircle(Offset(rnd.nextDouble() * 256, rnd.nextDouble() * 256), rnd.nextDouble() * 1.3 + 0.3, p);
+  }
+  final f = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 0.6
+    ..color = const Color(0x1E6E5028);
+  for (var i = 0; i < 160; i++) {
+    final x = rnd.nextDouble() * 256, y = rnd.nextDouble() * 256;
+    c.drawPath(
+        Path()
+          ..moveTo(x, y)
+          ..quadraticBezierTo(x + rnd.nextDouble() * 14 - 7, y + rnd.nextDouble() * 14 - 7, x + rnd.nextDouble() * 18 - 9,
+              y + rnd.nextDouble() * 18 - 9),
+        f);
+  }
+  return rec.endRecording().toImage(256, 256);
+}
+
+class _PaperPainter extends CustomPainter {
+  _PaperPainter(this.img);
+  final ui.Image img;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final r = Offset.zero & size;
+    canvas.drawRect(
+        r,
+        Paint()
+          ..shader = ImageShader(img, TileMode.repeated, TileMode.repeated, Matrix4.identity().storage)
+          ..blendMode = BlendMode.multiply);
+    // пятна времени
+    final spots = [
+      [0.18, 0.22, 0.20],
+      [0.78, 0.18, 0.16],
+      [0.62, 0.76, 0.22],
+      [0.12, 0.82, 0.15],
+    ];
+    for (final s in spots) {
+      final ctr = Offset(size.width * s[0], size.height * s[1]);
+      final rad = size.shortestSide * s[2];
+      canvas.drawCircle(
+          ctr,
+          rad,
+          Paint()
+            ..shader = const RadialGradient(colors: [Color(0x228A5A1E), Color(0x00000000)])
+                .createShader(Rect.fromCircle(center: ctr, radius: rad)));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PaperPainter old) => old.img != img;
+}
+
+/// Рамка, затемнённые края, бумажная фактура и роза ветров поверх карты в старинном стиле.
 class VintageOverlay extends StatelessWidget {
   final bool vignette;
   final bool compass;
-  const VintageOverlay({super.key, required this.vignette, required this.compass});
+  final bool paper;
+  const VintageOverlay({super.key, required this.vignette, required this.compass, this.paper = false});
 
   @override
   Widget build(BuildContext context) {
     return Positioned.fill(
       child: IgnorePointer(
         child: Stack(children: [
+          if (paper)
+            Positioned.fill(
+              child: FutureBuilder<ui.Image>(
+                future: _grain ??= _makeGrain(),
+                builder: (_, snap) => snap.hasData
+                    ? RepaintBoundary(child: CustomPaint(painter: _PaperPainter(snap.data!)))
+                    : const SizedBox.shrink(),
+              ),
+            ),
           if (vignette)
             Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: RadialGradient(
-                    radius: 1.05,
-                    colors: [Colors.transparent, Colors.transparent, const Color(0x663A2410)],
-                    stops: const [0, 0.62, 1],
+                    radius: 1.1,
+                    colors: [Colors.transparent, Colors.transparent, const Color(0x553A2410)],
+                    stops: const [0, 0.68, 1],
                   ),
                 ),
               ),

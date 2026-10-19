@@ -27,8 +27,23 @@ class Config {
   static String otpUrl = '';
 
   /// Остановки грузятся при масштабе от этого значения, станции и вокзалы — раньше.
-  static const minStopsZoom = 15.0;
-  static const minStationsZoom = 11.0;
+  static const minStopsZoom = 14.0;
+  static const minStationsZoom = 10.0;
+
+  /// Определять положение при запуске (Windows спросит разрешение один раз).
+  static bool autoLocate = true;
+
+  /// Морские чудовища, легенды и линии румбов на старинной карте.
+  static bool seaLore = true;
+
+  /// Последний вид карты: при следующем запуске карта откроется там же.
+  static double? lastLat, lastLon;
+  static double lastZoom = 12;
+  static String baseName = 'scheme';
+  static String prevBaseName = 'scheme';
+
+  /// Вопрос про положение уже задавали (при первом запуске).
+  static bool locAsked = false;
 
   static const languages = <AppLang>[
     AppLang('ru', 'Русский'),
@@ -64,6 +79,29 @@ class Config {
       yandexKeys = p.getString('yandex_keys') ?? '';
       transitlandKey = p.getString('tl_key') ?? '';
       otpUrl = p.getString('otp_url') ?? '';
+      autoLocate = p.getBool('auto_locate') ?? true;
+      seaLore = p.getBool('sea_lore') ?? true;
+      lastLat = p.getDouble('last_lat');
+      lastLon = p.getDouble('last_lon');
+      lastZoom = p.getDouble('last_zoom') ?? 12;
+      baseName = p.getString('base') ?? 'scheme';
+      prevBaseName = p.getString('prev_base') ?? 'scheme';
+      locAsked = p.getBool('loc_asked') ?? false;
+    } catch (_) {}
+  }
+
+  /// Быстро сохраняет только вид карты (центр, масштаб, выбранный слой).
+  static Future<void> saveView() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      if (lastLat != null && lastLon != null) {
+        await p.setDouble('last_lat', lastLat!);
+        await p.setDouble('last_lon', lastLon!);
+      }
+      await p.setDouble('last_zoom', lastZoom);
+      await p.setString('base', baseName);
+      await p.setString('prev_base', prevBaseName);
+      await p.setBool('loc_asked', locAsked);
     } catch (_) {}
   }
 
@@ -77,6 +115,11 @@ class Config {
       await p.setString('yandex_keys', yandexKeys);
       await p.setString('tl_key', transitlandKey);
       await p.setString('otp_url', otpUrl);
+      await p.setBool('auto_locate', autoLocate);
+      await p.setBool('sea_lore', seaLore);
+      await p.setBool('loc_asked', locAsked);
+      await p.setString('prev_base', prevBaseName);
+      await p.setString('base', baseName);
     } catch (_) {}
   }
 }

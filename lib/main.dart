@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 import 'app_theme.dart';
 import 'config.dart';
-import 'map_screen.dart';
-import 'tile_cache.dart';
+import 'splash.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Config.load();
-  await initTileCache();
   runApp(const TransitApp());
 }
 
@@ -25,7 +23,7 @@ class TransitApp extends StatelessWidget {
             theme: pirate ? pirateTheme() : modernTheme(Brightness.light),
             darkTheme: pirate ? pirateTheme() : modernTheme(Brightness.dark),
             themeMode: pirate ? ThemeMode.light : ThemeMode.system,
-            home: const MapScreen(),
+            home: const BootGate(),
           );
         },
       );

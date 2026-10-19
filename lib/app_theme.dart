@@ -144,3 +144,6 @@ ThemeData _buildPirate() {
     progressIndicatorTheme: const ProgressIndicatorThemeData(color: Pirate.wax),
   );
 }
+
+/// Рукописный шрифт для подписей на старинной карте (цвет задаётся при рисовании).
+TextStyle pirateScript() => GoogleFonts.getFont('Marck Script', fontWeight: FontWeight.w700);
